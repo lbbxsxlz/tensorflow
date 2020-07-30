@@ -80,6 +80,8 @@ _python_eager_context_create_counter = monitoring.Counter(
 class _EagerTensorCache(object):
   """Simple cache which evicts items based on length in a FIFO manner."""
 
+  __slots__ = ["_data", "_max_items", "_max_tensor_size"]
+
   def __init__(self, max_items=256, max_tensor_size=10000):
     self._data = collections.OrderedDict()
     self._max_items = max_items
@@ -98,7 +100,7 @@ class _EagerTensorCache(object):
     return self._data.get(key, None)
 
   def flush(self):
-    self._data = {}
+    self._data.clear()
 
 
 class FunctionCallOptions(object):
@@ -106,6 +108,8 @@ class FunctionCallOptions(object):
 
   Eager functions are functions decorated with tf.contrib.eager.defun.
   """
+
+  __slots__ = ["_config_proto_serialized", "_executor_type"]
 
   def __init__(self, executor_type=None, config_proto=None):
     """Constructor.
@@ -160,6 +164,8 @@ _tensor_caches_map = {}
 
 class _TensorCaches(threading.local):
   """Thread local tensor caches."""
+
+  __slots__ = ["_ones_rank_cache", "_zeros_cache"]
 
   def __init__(self):
     super(_TensorCaches, self).__init__()
@@ -316,6 +322,8 @@ class PhysicalDevice(
 class _AtomicCounter(object):
   """A simple atomic counter."""
 
+  __slots__ = ["_value", "_lock"]
+
   def __init__(self):
     self._value = 0
     self._lock = threading.Lock()
@@ -331,6 +339,8 @@ _context_id_counter = _AtomicCounter()
 
 class _TensorCacheDeleter(object):
   """Deletes tensor caches for a given context."""
+
+  __slots__ = ["_context_id"]
 
   def __init__(self, context_id):
     self._context_id = context_id
@@ -427,7 +437,7 @@ class Context(object):
       raise ValueError(
           "execution_mode should be None/SYNC/ASYNC. Got %s" % execution_mode)
     if execution_mode is None:
-      execution_mode = SYNC
+      execution_mode = ASYNC if is_tfrt_enabled() else SYNC
     self._default_is_async = execution_mode == ASYNC
     self._lazy_remote_inputs_copy = None
     self._use_tfrt = is_tfrt_enabled()
@@ -451,7 +461,6 @@ class Context(object):
     self._inter_op_parallelism_threads = None
     self._soft_device_placement = None
     self._log_device_placement = None
-    self._enable_mlir_bridge = None
     self._enable_mlir_graph_optimization = None
     self._optimizer_experimental_options = {}
 
@@ -747,6 +756,21 @@ class Context(object):
     self._collective_use_nccl_communication = use_nccl_communication
     self._collective_device_filters = device_filters
 
+  def abort_collective_ops(self, code, message):
+    """Abort the collective ops.
+
+    This is intended to be used when a peer failure is detected, which allows
+    the user to handle the case instead of hanging. This aborts all on-going
+    collectives. After all subsequent collectives error immediately. The only
+    way to recovery now is to restart the program.
+
+    Args:
+      code: a `tf.errors` error code.
+      message: a string. The error message.
+    """
+    self.ensure_initialized()
+    pywrap_tfe.TFE_AbortCollectiveOps(self._handle, code, message)
+
   @property
   def _handle(self):
     if self._context_handle is None:
@@ -891,13 +915,13 @@ class Context(object):
 
   @property
   def executor(self):
-    ensure_initialized()
+    self.ensure_initialized()
     return executor.Executor(
         pywrap_tfe.TFE_ContextGetExecutorForThread(self._context_handle))
 
   @executor.setter
   def executor(self, e):
-    ensure_initialized()
+    self.ensure_initialized()
     pywrap_tfe.TFE_ContextSetExecutorForThread(self._context_handle, e.handle())
 
   @property
@@ -927,8 +951,7 @@ class Context(object):
     if self._log_device_placement is not None:
       config.log_device_placement = self._log_device_placement
 
-    if self._enable_mlir_bridge is not None:
-      config.experimental.enable_mlir_bridge = self._enable_mlir_bridge
+    config.experimental.enable_mlir_bridge = pywrap_tfe.TF_IsMlirBridgeEnabled()
     if self._enable_mlir_graph_optimization is not None:
       config.experimental.enable_mlir_graph_optimization = (
           self._enable_mlir_graph_optimization)
@@ -1466,7 +1489,7 @@ class Context(object):
 
   @property
   def enable_mlir_bridge(self):
-    return self._enable_mlir_bridge
+    return pywrap_tfe.TF_IsMlirBridgeEnabled()
 
   @property
   def enable_mlir_graph_optimization(self):
@@ -1474,7 +1497,7 @@ class Context(object):
 
   @enable_mlir_bridge.setter
   def enable_mlir_bridge(self, enabled):
-    self._enable_mlir_bridge = enabled
+    pywrap_tfe.TF_EnableMlirBridge(enabled)
     self._thread_local_data.function_call_options = None
 
   @enable_mlir_graph_optimization.setter
@@ -1732,6 +1755,8 @@ class Context(object):
 class _EagerDeviceContext(object):
   """Context-manager forcing placement of ops and Tensors on a device."""
 
+  __slots__ = ["_device_name", "_ctx", "_stack"]
+
   def __init__(self, ctx, device_name):
     self._device_name = device_name
     self._ctx = ctx
@@ -1879,9 +1904,8 @@ def executing_eagerly():
   True
   False
 
-  Inside `tf.function` after
+  Inside `tf.function` after `tf.config.run_functions_eagerly(True)` is called:
 
-  `tf.config.run_functions_eagerly(True)` is called:
   >>> tf.config.run_functions_eagerly(True)
   >>> @tf.function
   ... def fn():

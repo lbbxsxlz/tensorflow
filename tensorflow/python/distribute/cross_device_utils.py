@@ -19,6 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import collections as pycoll
+import copy
 import threading
 
 from tensorflow.python.distribute import all_reduce
@@ -229,14 +230,6 @@ def split_grads_by_size(threshold_size, device_grads):
   return small_grads, large_grads
 
 
-# threading.Lock() and threading.local() cannot be pickled and therefore cannot
-# be a field of CollectiveKeys. Right now _thread_local is not necessary to be
-# an instance member of CollectiveKeys since we always create a new thread for
-# each replica.
-_lock = threading.Lock()
-_thread_local = threading.local()
-
-
 # TODO(yuefengz): use random key starts to avoid reusing keys?
 class CollectiveKeys(object):
   """Class that manages collective keys.
@@ -253,6 +246,8 @@ class CollectiveKeys(object):
   "Graph key": an integer key that is unique key graph. This is used to support
   multiple graphs per client session. It must be non-zero and set in the
   `config` argument of each call to `session.run`.
+
+  This class is thread safe.
   """
 
   def __init__(self,
@@ -271,15 +266,9 @@ class CollectiveKeys(object):
     self._group_key_table = {}
 
     assert op_instance_key_start != variable_instance_key_start
-    self._op_instance_key_start = op_instance_key_start
+    self._op_instance_key = op_instance_key_start
     self._variable_instance_key = variable_instance_key_start
-
-  def _get_thread_local_object(self):
-    # We make instance key without key ids thread local so that it will work
-    # with MirroredStrategy and distribute coordinator.
-    if not hasattr(_thread_local, 'op_instance_key'):
-      _thread_local.op_instance_key = self._op_instance_key_start
-    return _thread_local
+    self._lock = threading.Lock()
 
   def get_group_key(self, devices):
     """Returns a group key for the set of devices.
@@ -298,41 +287,41 @@ class CollectiveKeys(object):
     # task_type and task_id.
     names = sorted(['%s:%d' % (d.device_type, d.device_index) for d in parsed])
     key_id = ','.join(names)
-    with _lock:
+    with self._lock:
       if key_id not in self._group_key_table:
         new_key = self._group_key
         self._group_key += 1
         self._group_key_table[key_id] = new_key
-    return self._group_key_table[key_id]
-
-  def get_group_key_of_tensors(self, tensors):
-    """Returns a group key for set of tensors.
-
-    Args:
-      tensors: list of `Tensor`s in a collective group. Each tensor must be on a
-        different device.
-
-    Returns:
-      int key uniquely identifying the set of devices of these tensors.
-    """
-    devices = [t.device for t in tensors]
-    return self.get_group_key(devices)
+      return self._group_key_table[key_id]
 
   def get_op_instance_key(self):
     """Returns a new instance key for use in defining a collective op."""
-    v = self._get_thread_local_object().op_instance_key
-    self._get_thread_local_object().op_instance_key += 1
-    return v
+    with self._lock:
+      v = self._op_instance_key
+      self._op_instance_key += 1
+      return v
 
   def get_variable_instance_key(self):
     """Returns a new instance key for use in creating a Variable."""
-    v = self._variable_instance_key
-    self._variable_instance_key += 1
-    return v
+    with self._lock:
+      v = self._variable_instance_key
+      self._variable_instance_key += 1
+      return v
+
+  def __deepcopy__(self, memo):
+    # distribute_coordinator deep-copies the strategy object, so
+    # CollectiveKeys needs to support deep copy as well.
+    copied = CollectiveKeys()
+    copied._group_key = self._group_key
+    copied._group_key_table = copy.deepcopy(self._group_key_table, memo)
+    copied._op_instance_key = self._op_instance_key
+    copied._variable_instance_key = self._variable_instance_key
+    return copied
 
 
 def build_collective_reduce(input_tensors,
-                            num_workers,
+                            devices,
+                            group_size,
                             collective_keys,
                             reduction_op='Add',
                             unary_op='Id',
@@ -347,9 +336,10 @@ def build_collective_reduce(input_tensors,
   Args:
     input_tensors: tensors within a single worker graph that are to be reduced
       together; must be one per device.
-    num_workers: total number of workers with identical independent graphs that
-      will be doing this same reduction.  The reduction will actually include
-      the corresponding tensors at all these workers.
+    devices: a list of device strings to run the collective on.
+    group_size: total number of devices globally that will be doing this same
+      reduction.  The reduction will actually include the corresponding tensors
+      at all these workers.
     collective_keys: a CollectiveKeys object.
     reduction_op: string naming the reduction op.
     unary_op: string naming the unary final op.
@@ -370,11 +360,14 @@ def build_collective_reduce(input_tensors,
         not all(e.is_async() for e in executors)):
       raise ValueError(
           'collectives requires async executors for each device in eager mode')
+  if len(input_tensors) != len(devices):
+    raise ValueError('collective requires one input tensor for each device, '
+                     'len(input_tensors) = %d, len(devices) = %d' %
+                     (len(input_tensors), len(devices)))
 
-  group_size = len(input_tensors) * num_workers
   if group_size < 2:
     return input_tensors
-  group_key = collective_keys.get_group_key_of_tensors(input_tensors)
+  group_key = collective_keys.get_group_key(devices)
   instance_key = collective_keys.get_op_instance_key()
   subdiv_offsets = [0]  # TODO(tucker): maybe support non-default subdiv spec
 
@@ -385,9 +378,9 @@ def build_collective_reduce(input_tensors,
     else:
       executor_scope = ops.NullContextmanager()
     with executor_scope, \
-         ops.device(input_tensor.device), \
+         ops.device(devices[idx]), \
          ops.control_dependencies(
-             _control_input(input_tensors, control_inputs, idx)):
+             _control_input(devices, control_inputs, idx)):
       out_tensor = collective_ops.all_reduce(input_tensor, group_size,
                                              group_key, instance_key,
                                              reduction_op, unary_op,
@@ -397,7 +390,8 @@ def build_collective_reduce(input_tensors,
 
 
 def build_collective_gather(input_tensors,
-                            num_workers,
+                            devices,
+                            group_size,
                             collective_keys,
                             communication_hint='AUTO',
                             control_inputs=None):
@@ -408,9 +402,10 @@ def build_collective_gather(input_tensors,
   Args:
     input_tensors: tensors within a single worker graph that are to be gathered
       together; must be one per device.
-    num_workers: total number of workers with identical independent graphs that
-      will be doing this same reduction.  The reduction will actually include
-      the corresponding tensors at all these workers.
+    devices: a list of device strings to run the collective on.
+    group_size: total number of devices globally that will be doing this same
+      gathering. The gathering will actually include the corresponding tensors
+      at all these workers.
     collective_keys: a CollectiveKeys object.
     communication_hint: string providing hint to runtime for choosing collective
       implementation.
@@ -423,18 +418,21 @@ def build_collective_gather(input_tensors,
   assert not context.executing_eagerly(), (
       'build_collective_gather can only be called in graph mode or inside '
       'tf.function')
+  if len(input_tensors) != len(devices):
+    raise ValueError(
+        'collective requires one input tensor for each device, %d != %d' %
+        (len(input_tensors), len(devices)))
 
-  group_size = len(input_tensors) * num_workers
   if group_size < 2:
     return input_tensors
-  group_key = collective_keys.get_group_key_of_tensors(input_tensors)
+  group_key = collective_keys.get_group_key(devices)
   instance_key = collective_keys.get_op_instance_key()
 
   out_tensors = []
   for idx, input_tensor in enumerate(input_tensors):
-    with ops.device(input_tensor.device):
+    with ops.device(devices[idx]):
       with ops.control_dependencies(
-          _control_input(input_tensors, control_inputs, idx)):
+          _control_input(devices, control_inputs, idx)):
         out_tensor = collective_ops.all_gather(input_tensor, group_size,
                                                group_key, instance_key,
                                                communication_hint)
@@ -443,7 +441,8 @@ def build_collective_gather(input_tensors,
 
 
 def build_collective_gather_indexed_slices(input_slices_list,
-                                           num_workers,
+                                           devices,
+                                           group_size,
                                            collective_keys,
                                            communication_hint='AUTO',
                                            control_inputs=None):
@@ -454,9 +453,10 @@ def build_collective_gather_indexed_slices(input_slices_list,
   Args:
     input_slices_list: a list of IndexedSlices within a single worker graph that
       are to be gathered together; must be one per device.
-    num_workers: total number of workers with identical independent graphs that
-      will be doing this same reduction.  The reduction will actually include
-      the corresponding tensors at all these workers.
+    devices: a list of device strings to run the collective on.
+    group_size: total number of devices globally that will be doing this same
+      gathering. The gathering will actually include the corresponding tensors
+      at all these workers.
     collective_keys: a CollectiveKeys object.
     communication_hint: string providing hint to runtime for choosing collective
       implementation.
@@ -474,12 +474,15 @@ def build_collective_gather_indexed_slices(input_slices_list,
   assert not context.executing_eagerly(), (
       'build_collective_gather_indexed_slices can only be called in graph mode'
       ' or inside tf.function')
+  if len(input_slices_list) != len(devices):
+    raise ValueError(
+        'collective requires one input IndexedSlice for each device, %d != %d' %
+        (len(input_slices_list), len(devices)))
 
-  group_size = len(input_slices_list) * num_workers
   if group_size < 2:
     return input_slices_list
 
-  group_key = collective_keys.get_group_key_of_tensors(input_slices_list)
+  group_key = collective_keys.get_group_key(devices)
   gather_length_key = collective_keys.get_op_instance_key()
   gather_indices_key = collective_keys.get_op_instance_key()
   gather_values_key = collective_keys.get_op_instance_key()
@@ -495,7 +498,7 @@ def build_collective_gather_indexed_slices(input_slices_list,
   out_slices_list = []
   for idx, input_slices in enumerate(input_slices_list):
     # pylint: disable = cell-var-from-loop
-    with ops.device(input_slices.device):
+    with ops.device(devices[idx]):
 
       def all_gather():
         """Use all_gather to aggregate `IndexedSlices`."""
@@ -967,14 +970,13 @@ def pack_by_size(per_replica_list, bytes_per_pack):
   return packs
 
 
-def _control_input(inputs, control_inputs, idx):
+def _control_input(devices, control_inputs, idx):
   """Returns the `idx`-th item in control_inputs to be used in ops.control_dependencies.
 
-  This is a helper function for building collective ops.  The function checks
-  that the devices of control_inputs and inputs match.
+  This is a helper function for building collective ops.
 
   Args:
-    inputs: a list of `Tensor`s
+    devices: a list of device strings the collective run on.
     control_inputs: a list or None.
     idx: the index into `inputs` and `control_inputs`.
 
@@ -984,12 +986,8 @@ def _control_input(inputs, control_inputs, idx):
   """
   if control_inputs is None:
     return []
-  if len(control_inputs) != len(inputs):
+  if len(control_inputs) != len(devices):
     raise ValueError(
-        'control_inputs must match the length of the inputs, %s != %s' %
-        (len(control_inputs), len(inputs)))
-  if control_inputs[idx].device != inputs[idx].device:
-    raise ValueError(
-        'control_inputs must match the device of the inputs, %s != %s' %
-        (control_inputs[idx].device, inputs[idx].device))
+        'control_inputs must match the length of the devices, %s != %s' %
+        (len(control_inputs), len(devices)))
   return [control_inputs[idx]]

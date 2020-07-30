@@ -15,7 +15,7 @@ ifeq ($(TARGET),$(filter $(TARGET),\
   GCC_ARM := $(MAKEFILE_DIR)/downloads/gcc_embedded/
 
   $(eval $(call add_third_party_download,$(GCC_EMBEDDED_URL),$(GCC_EMBEDDED_MD5),gcc_embedded,))
-  $(eval $(call add_third_party_download,$(CMSIS_URL),$(CMSIS_MD5),cmsis,))
+  $(eval $(call add_third_party_download,$(CMSIS_URL),$(CMSIS_MD5),cmsis,patch_cmsis))
   $(eval $(call add_third_party_download,$(AM_SDK_URL),$(AM_SDK_MD5),$(AM_SDK_DEST),patch_am_sdk))
 
   ifeq ($(findstring sparkfun,$(TARGET)), sparkfun)
@@ -23,9 +23,6 @@ ifeq ($(TARGET),$(filter $(TARGET),\
     # Make sure that we download the full Ambiq SDK before the SparkFun BSPs.
 $(MAKEFILE_DIR)/downloads/$(AM_SDK_DEST)/$(SF_BSPS_DEST): $(MAKEFILE_DIR)/downloads/$(AM_SDK_DEST)
   endif
-
-  # Use the faster depthwise conv implementation.
-  ALL_TAGS += portable_optimized
 
   PLATFORM_FLAGS = \
     -DPART_apollo3 \
@@ -53,18 +50,14 @@ $(MAKEFILE_DIR)/downloads/$(AM_SDK_DEST)/$(SF_BSPS_DEST): $(MAKEFILE_DIR)/downlo
     -Wvla \
     -Wall \
     -Wextra \
-    -Wsign-compare \
-    -Wdouble-promotion \
-    -Wunused-variable \
-    -Wshadow \
-    -Wmissing-field-initializers \
+    -Wno-missing-field-initializers \
+    -Wno-strict-aliasing \
+    -Wno-type-limits \
+    -Wno-unused-function \
     -Wno-unused-parameter \
-    -Wno-write-strings \
-    -Wunused-function \
     -fno-delete-null-pointer-checks \
     -fno-threadsafe-statics \
     -fomit-frame-pointer \
-    -fpermissive \
     -fno-use-cxa-atexit \
     -nostdlib \
     -ggdb \
@@ -125,9 +118,11 @@ $(MAKEFILE_DIR)/downloads/$(AM_SDK_DEST)/$(SF_BSPS_DEST): $(MAKEFILE_DIR)/downlo
 
   CMSIS_SRC_DIR := $(MAKEFILE_DIR)/downloads/cmsis/CMSIS/DSP/Source
   THIRD_PARTY_CC_SRCS := \
+  $(CMSIS_SRC_DIR)/BasicMathFunctions/arm_dot_prod_q15.c \
   $(CMSIS_SRC_DIR)/BasicMathFunctions/arm_mult_q15.c \
   $(CMSIS_SRC_DIR)/TransformFunctions/arm_rfft_init_q15.c \
   $(CMSIS_SRC_DIR)/TransformFunctions/arm_rfft_q15.c \
+  $(CMSIS_SRC_DIR)/TransformFunctions/arm_bitreversal2.c \
   $(CMSIS_SRC_DIR)/TransformFunctions/arm_cfft_q15.c \
   $(CMSIS_SRC_DIR)/TransformFunctions/arm_cfft_radix4_q15.c \
   $(CMSIS_SRC_DIR)/CommonTables/arm_const_structs.c \

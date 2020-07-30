@@ -39,11 +39,10 @@ limitations under the License.
 #include "mlir/IR/StandardTypes.h"  // from @llvm-project
 #include "mlir/IR/TypeUtilities.h"  // from @llvm-project
 #include "mlir/IR/UseDefLists.h"  // from @llvm-project
+#include "tensorflow/compiler/mlir/hlo/include/mlir-hlo/Dialect/mhlo/IR/hlo_ops.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/convert_type.h"
-#include "tensorflow/compiler/mlir/xla/ir/hlo_ops.h"
 #include "tensorflow/compiler/mlir/xla/type_to_shape.h"
 #include "tensorflow/compiler/tf2xla/shape_util.h"
-#include "tensorflow/compiler/tf2xla/xla_compiler.h"
 #include "tensorflow/compiler/xla/client/lib/matrix.h"
 #include "tensorflow/compiler/xla/client/lib/quantize.h"
 #include "tensorflow/compiler/xla/client/lib/slicing.h"
@@ -69,12 +68,12 @@ using ::tensorflow::uint32;
 using ::tensorflow::uint64;
 using ::tensorflow::uint8;
 
-constexpr char kPaddingMapAttr[] = "xla_hlo.padding_map";
+constexpr char kPaddingMapAttr[] = "mhlo.padding_map";
 constexpr char kShapeIndicesAttr[] = "shape_indices";
 constexpr char kPaddingArgIndicesAttr[] = "padding_arg_indices";
-constexpr char kShardingAttr[] = "xla_hlo.sharding";
-constexpr char kFrontendAttributesAttr[] = "xla_hlo.frontend_attributes";
-constexpr char kRepicationAttr[] = "xla_hlo.is_same_data_across_replicas";
+constexpr char kShardingAttr[] = "mhlo.sharding";
+constexpr char kFrontendAttributesAttr[] = "mhlo.frontend_attributes";
+constexpr char kRepicationAttr[] = "mhlo.is_same_data_across_replicas";
 
 // Passes through everything except for unique_ptr, on which it calls get().
 // This exists to allow the generated code to call XLA functions that take a raw
@@ -170,8 +169,8 @@ static std::vector<std::pair<int64, int64>> Convert_source_target_pairs(
 
 static std::vector<xla::ReplicaGroup> Convert_replica_groups(
     mlir::DenseIntElementsAttr groups) {
-  int64_t num_groups = groups.getType().getDimSize(0);
-  int64_t group_size = groups.getType().getDimSize(1);
+  uint64_t num_groups = groups.getType().getDimSize(0);
+  uint64_t group_size = groups.getType().getDimSize(1);
 
   std::vector<xla::ReplicaGroup> result;
   result.reserve(num_groups);
@@ -247,7 +246,7 @@ static std::unique_ptr<xla::PrecisionConfig> Convert_precision_config(
 }
 
 static xla::DotDimensionNumbers Convert_dot_dimension_numbers(
-    mlir::xla_hlo::DotDimensionNumbers dot_dimension_numbers_attr) {
+    mlir::mhlo::DotDimensionNumbers dot_dimension_numbers_attr) {
   xla::DotDimensionNumbers dot_dimension_numbers;
 
   auto rhs_contracting_dimensions =
@@ -282,7 +281,7 @@ static xla::DotDimensionNumbers Convert_dot_dimension_numbers(
 }
 
 static xla::ConvolutionDimensionNumbers Convert_dimension_numbers(
-    mlir::xla_hlo::ConvDimensionNumbers input) {
+    mlir::mhlo::ConvDimensionNumbers input) {
   xla::ConvolutionDimensionNumbers output;
 
   output.set_input_batch_dimension(
@@ -315,7 +314,7 @@ static xla::ConvolutionDimensionNumbers Convert_dimension_numbers(
   return output;
 }
 
-xla::ChannelHandle Convert_channel_handle(mlir::xla_hlo::ChannelHandle attr) {
+xla::ChannelHandle Convert_channel_handle(mlir::mhlo::ChannelHandle attr) {
   xla::ChannelHandle channel_handle;
   channel_handle.set_handle(ConvertAPInt(attr.handle().getValue()));
   channel_handle.set_type(static_cast<xla::ChannelHandle::ChannelType>(
@@ -333,7 +332,7 @@ static xla::ComparisonDirection Convert_comparison_direction(
 }
 
 static xla::GatherDimensionNumbers Convert_dimension_numbers(
-    mlir::xla_hlo::GatherDimensionNumbers input) {
+    mlir::mhlo::GatherDimensionNumbers input) {
   xla::GatherDimensionNumbers output;
 
   auto offset_dims = ConvertDenseIntAttr(input.offset_dims());
@@ -357,7 +356,7 @@ static xla::GatherDimensionNumbers Convert_dimension_numbers(
 }
 
 static xla::ScatterDimensionNumbers Convert_scatter_dimension_numbers(
-    mlir::xla_hlo::ScatterDimensionNumbers input) {
+    mlir::mhlo::ScatterDimensionNumbers input) {
   xla::ScatterDimensionNumbers output;
 
   auto update_window_dims = ConvertDenseIntAttr(input.update_window_dims());
@@ -435,14 +434,14 @@ static void ExtractShardingsFromFunction(
     llvm::SmallVectorImpl<absl::optional<xla::OpSharding>>* ret_shardings) {
   arg_shardings->resize(function.getNumArguments(),
                         absl::optional<xla::OpSharding>());
-  for (int i = 0; i < function.getNumArguments(); ++i)
+  for (int i = 0, end = function.getNumArguments(); i < end; ++i)
     if (auto sharding =
             function.getArgAttrOfType<mlir::StringAttr>(i, kShardingAttr))
       (*arg_shardings)[i] = CreateOpShardingFromStringRef(sharding.getValue());
 
   ret_shardings->resize(function.getNumResults(),
                         absl::optional<xla::OpSharding>());
-  for (int i = 0; i < function.getNumResults(); ++i)
+  for (int i = 0, end = function.getNumResults(); i < end; ++i)
     if (auto sharding =
             function.getResultAttrOfType<mlir::StringAttr>(i, kShardingAttr))
       (*ret_shardings)[i] = CreateOpShardingFromStringRef(sharding.getValue());
@@ -463,7 +462,7 @@ class ConvertToHloModule {
   // single value.
   explicit ConvertToHloModule(
       mlir::ModuleOp module, bool use_tuple_args, bool return_tuple,
-      tensorflow::XlaCompiler::ShapeRepresentationFn shape_representation_fn)
+      tensorflow::XlaHelpers::ShapeRepresentationFn shape_representation_fn)
       : module_(module),
         module_builder_("main"),
         use_tuple_args_(use_tuple_args),
@@ -545,7 +544,7 @@ class ConvertToHloModule {
 
   // Shape representation function to determine entry function argument and
   // result shapes.
-  tensorflow::XlaCompiler::ShapeRepresentationFn shape_representation_fn_;
+  tensorflow::XlaHelpers::ShapeRepresentationFn shape_representation_fn_;
 
   // Unique suffix to give to the name of the next lowered region.
   size_t region_id_ = 0;
@@ -574,7 +573,7 @@ llvm::SmallVector<xla::XlaOp, 4> GetTuple(mlir::Operation::operand_range values,
 }  // namespace
 
 namespace mlir {
-namespace xla_hlo {
+namespace mhlo {
 namespace {
 
 LogicalResult ExportXlaOp(AllReduceOp op, OpLoweringContext ctx) {
@@ -758,7 +757,7 @@ LogicalResult ExportXlaOp(PadOp op, OpLoweringContext ctx) {
   auto edge_padding_low = ConvertDenseIntAttr(op.edge_padding_low());
   auto edge_padding_high = ConvertDenseIntAttr(op.edge_padding_high());
   auto interior_padding = ConvertDenseIntAttr(op.interior_padding());
-  for (xla::int64 i = 0; i < edge_padding_low.size(); ++i) {
+  for (xla::int64 i = 0, end = edge_padding_low.size(); i < end; ++i) {
     auto* dims = padding_config.add_dimensions();
     dims->set_edge_padding_low(edge_padding_low[i]);
     dims->set_edge_padding_high(edge_padding_high[i]);
@@ -829,7 +828,7 @@ LogicalResult ExportXlaOp(ReshapeOp op, OpLoweringContext ctx) {
 }
 
 LogicalResult ExportXlaOp(ReturnOp op, OpLoweringContext ctx) {
-  // Failure on purpose because `xla_hlo::ReturnOp` will be handled by
+  // Failure on purpose because `mhlo::ReturnOp` will be handled by
   // special purpose logic in `ConvertToHloModule::Lower`.
   return failure();
 }
@@ -943,7 +942,7 @@ LogicalResult ExportXlaOp(FusionOp op, OpLoweringContext ctx) {
 }
 
 }  // namespace
-}  // namespace xla_hlo
+}  // namespace mhlo
 }  // namespace mlir
 
 #include "tensorflow/compiler/mlir/xla/operator_writers.inc"
@@ -1060,7 +1059,7 @@ LogicalResult ConvertToHloModule::Lower(
     return success();
   }
 
-  if (isa<xla_hlo::ReturnOp>(inst) || isa<mlir::ReturnOp>(inst)) {
+  if (isa<mhlo::ReturnOp, mlir::ReturnOp>(inst)) {
     // Construct the return value for the function. If there are multiple
     // values returned, then create a tuple, else return value directly.
     xla::XlaOp return_value;
@@ -1148,13 +1147,13 @@ LogicalResult ConvertToHloModule::LowerFunctionCall(
 
 LogicalResult ConvertToHloModule::RunOnFunction(mlir::FuncOp f) {
   if (lowered_computation_.count(f)) return success();
-  if (f.getBlocks().size() != 1) {
+  if (!llvm::hasSingleElement(f)) {
     return f.emitError("only single block Function supported");
   }
 
   // Create a sub-builder if this is not the main function.
   std::unique_ptr<xla::XlaBuilder> builder_up;
-  bool entry_function = f.getName().str() == "main";
+  bool entry_function = f.getName() == "main";
   if (!entry_function)
     builder_up = module_builder_.CreateSubBuilder(f.getName().str());
   auto& builder = entry_function ? module_builder_ : *builder_up;
@@ -1405,7 +1404,7 @@ void AddDynamicParameterBindingEntry(xla::DynamicParameterBindingProto* binding,
 }
 
 // Validates and populates dynamic parameter bindings from a module's entry
-// function `xla_hlo.padding_map` argument attributes to a `xla::HloModuleProto`
+// function `mhlo.padding_map` argument attributes to a `xla::HloModuleProto`
 // `DynamicParameterBindingProto`.
 LogicalResult AddDynamicParameterBindings(mlir::ModuleOp module,
                                           xla::HloModuleProto* hlo_module_proto,
@@ -1500,7 +1499,7 @@ LogicalResult AddDynamicParameterBindings(mlir::ModuleOp module,
 
 Status ConvertMlirHloToHlo(mlir::ModuleOp module, xla::HloProto* hlo_proto,
                            bool use_tuple_args, bool return_tuple,
-                           const tensorflow::XlaCompiler::ShapeRepresentationFn
+                           const tensorflow::XlaHelpers::ShapeRepresentationFn
                                shape_representation_fn) {
   mlir::StatusScopedDiagnosticHandler diag_handler(module.getContext());
   ConvertToHloModule converter(module, use_tuple_args, return_tuple,

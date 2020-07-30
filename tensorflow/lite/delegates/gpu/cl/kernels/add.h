@@ -36,29 +36,11 @@ class Add : public ElementwiseOperation {
   Add(const OperationDef& definition, const std::vector<int>& channels,
       int dst_channels);
 
-  absl::Status Compile(const CreationContext& creation_context) override;
-
   // Move only
   Add(Add&& operation);
   Add& operator=(Add&& operation);
   Add(const Add&) = delete;
   Add& operator=(const Add&) = delete;
-
-  void SetLinkIndex(int index) override;
-  std::string GetCoreCode(const LinkingContext& context) const override;
-  std::string GetArgsDeclaration() const override;
-  absl::Status BindArguments(CLKernel* kernel) override;
-  absl::Status SetArgs(int link_id, Arguments* args) override;
-  bool IsLinkable() const override { return dst_depth_ == src_depthes_[0]; }
-
- private:
-  std::string GetElementWiseCode(
-      const OperationDef& op_def,
-      const std::vector<ElementwiseOperation*>& linked_operations);
-
-  int link_index_;
-  std::vector<int> src_depthes_;
-  int dst_depth_;
 };
 
 Add CreateAdd(const OperationDef& definition, const std::vector<int>& channels,
