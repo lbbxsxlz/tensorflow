@@ -42,6 +42,7 @@ from tensorflow.python.framework import device as pydev
 from tensorflow.python.util import compat
 from tensorflow.python.util import is_in_graph_mode
 from tensorflow.python.util import tf_contextlib
+from tensorflow.python.util.deprecation import deprecated
 from tensorflow.python.util.tf_export import tf_export
 
 GRAPH_MODE = 0
@@ -66,9 +67,6 @@ DEVICE_PLACEMENT_SILENT_FOR_INT32 = (
 
 SYNC = 0
 ASYNC = 1
-
-MIRRORING_NONE = pywrap_tfe.TFE_MIRRORING_NONE
-MIRRORING_ALL = pywrap_tfe.TFE_MIRRORING_ALL
 
 _KEEP_ALIVE_SECS = 600
 
@@ -1254,12 +1252,7 @@ class Context(object):
           p: i for i, p in enumerate(self._physical_devices)
       }
 
-      # Construct the visible device list from all physical devices but ignore
-      # XLA devices
-      self._visible_device_list = [
-          d for d in self._physical_devices
-          if not d.device_type.startswith("XLA")
-      ]
+      self._visible_device_list = list(self._physical_devices)
       self._memory_growth_map = {
           d: None for d in self._physical_devices if d.device_type == "GPU"
       }
@@ -1413,6 +1406,12 @@ class Context(object):
 
     self._visible_device_list = visible_device_list
 
+  def get_total_memory_usage(self, dev):
+    """Returns total memory usage in bytes for the current device."""
+    self._initialize_physical_devices()
+    self.ensure_initialized()
+    return pywrap_tfe.TFE_GetTotalMemoryUsage(self._context_handle, dev)
+
   def get_memory_growth(self, dev):
     """Get if memory growth is enabled for a PhysicalDevice."""
     self._initialize_physical_devices()
@@ -1486,6 +1485,12 @@ class Context(object):
           "Virtual devices cannot be modified after being initialized")
 
     self._virtual_device_map[dev] = virtual_devices
+
+  @deprecated(
+      None, "XLA:CPU and XLA:GPU devices are deprecated", warn_once=True)
+  def enable_xla_devices(self):
+    """Enables XLA:CPU and XLA:GPU devices registration."""
+    pywrap_tfe.TF_EnableXlaDevices()
 
   @property
   def enable_mlir_bridge(self):
@@ -1639,27 +1644,6 @@ class Context(object):
       if self._context_handle is not None:
         pywrap_tfe.TFE_ContextSetThreadLocalDevicePlacementPolicy(
             self._handle, self._device_policy)
-
-  @property
-  def mirroring_policy(self):
-    # Only get the policy from the context if it has already been initialized
-    if self._context_handle is not None:
-      return pywrap_tfe.TFE_ContextGetMirroringPolicy(self._handle)
-
-    return self._mirroring_policy
-
-  @mirroring_policy.setter
-  def mirroring_policy(self, policy):
-    if policy is None:
-      policy = MIRRORING_NONE
-
-    if self._mirroring_policy is None or self._mirroring_policy != policy:
-      self._mirroring_policy = policy
-
-      # Only set the policy if the context has already been initialized
-      if self._context_handle is not None:
-        pywrap_tfe.TFE_ContextSetThreadLocalMirroringPolicy(
-            self._handle, self._mirroring_policy)
 
   @property
   def lazy_remote_inputs_copy(self):
@@ -2096,18 +2080,6 @@ def device_policy(policy):
     ctx.device_policy = old_policy
 
 
-@tf_contextlib.contextmanager
-def mirroring_policy(policy):
-  """Context manager for setting mirroring policy for current thread."""
-  ctx = context()
-  old_policy = ctx.mirroring_policy
-  try:
-    ctx.mirroring_policy = policy
-    yield
-  finally:
-    ctx.mirroring_policy = old_policy
-
-
 def set_execution_mode(mode):
   """Sets execution mode for the current thread."""
   context().execution_mode = mode
@@ -2310,7 +2282,7 @@ def async_scope():
         train_step_fn()
   except tf.errors.OutOfRangeError:
     tf.experimental.async_clear_error()
-  logging.info('loss =', loss.numpy())
+  logging.info('loss = %s', loss.numpy())
   ```
 
   Yields:
@@ -2364,7 +2336,7 @@ def async_clear_error():
     except tf.errors.OutOfRangeError:
       tf.experimental.async_clear_error()
       break
-  logging.info('loss =', loss.numpy())
+  logging.info('loss = %s', loss.numpy())
   ```
   """
   context().clear_executor_errors()

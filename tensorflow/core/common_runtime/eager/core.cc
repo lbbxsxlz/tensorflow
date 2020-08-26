@@ -191,20 +191,19 @@ Status EagerContext::RegisterFunction(AbstractFunction* f) {
 // eager_operation.cc we can avoid a circular dependency between them.
 Status EagerOperation::Execute(absl::Span<AbstractTensorHandle*> retvals,
                                int* num_retvals) {
+  for (int i = 0; i < Inputs().size(); ++i) {
+    TF_RETURN_IF_ERROR(Inputs()[i]->WaitUnknownDevice());
+  }
   // Run eager placement logic.
   VariantDevice device;
   TF_RETURN_IF_ERROR(eager::MaybePinToCustomDevice(&device, *this));
   if (device == kVariantDeviceNull) {
     TF_RETURN_IF_ERROR(eager::MaybePinToResourceDevice(&device, *this));
   }
-  if (device == kVariantDeviceNull) {
+  if (device == kVariantDeviceNull && ctx_.PinSmallOpsToCPU()) {
     bool pin_to_cpu;
     TF_RETURN_IF_ERROR(eager::MaybePinSmallOpsToCpu(
-        &pin_to_cpu, Name(),
-        absl::MakeSpan(
-            reinterpret_cast<ImmediateExecutionTensorHandle**>(inputs_.data()),
-            inputs_.size()),
-        ctx_));
+        &pin_to_cpu, Name(), GetInputs(), ctx_.HostCPU()->name()));
     if (pin_to_cpu) {
       device = ctx_.HostCPU();
     }

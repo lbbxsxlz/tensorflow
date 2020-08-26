@@ -477,7 +477,7 @@ class MirroredExtended(distribute_lib.StrategyExtendedV1):
         dataset,
         self._input_workers,
         self._container_strategy(),
-        split_batch_by=self._num_replicas_in_sync)
+        num_replicas_in_sync=self._num_replicas_in_sync)
 
   def _make_input_fn_iterator(
       self,
@@ -499,7 +499,7 @@ class MirroredExtended(distribute_lib.StrategyExtendedV1):
         dataset,
         self._input_workers_with_options(options),
         self._container_strategy(),
-        split_batch_by=self._num_replicas_in_sync)
+        num_replicas_in_sync=self._num_replicas_in_sync)
 
   def _experimental_make_numpy_dataset(self, numpy_input, session):
     return numpy_dataset.one_host_numpy_dataset(
@@ -691,9 +691,9 @@ class MirroredExtended(distribute_lib.StrategyExtendedV1):
   def read_var(self, replica_local_var):
     """Read the aggregate value of a replica-local variable."""
     # pylint: disable=protected-access
-    if values._is_sync_on_read(replica_local_var):
+    if distribute_utils.is_sync_on_read(replica_local_var):
       return replica_local_var._get_cross_replica()
-    assert values._is_mirrored(replica_local_var)
+    assert distribute_utils.is_mirrored(replica_local_var)
     return array_ops.identity(replica_local_var._get())
     # pylint: enable=protected-access
 

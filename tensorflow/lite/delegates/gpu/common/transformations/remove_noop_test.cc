@@ -15,12 +15,20 @@ limitations under the License.
 
 #include "tensorflow/lite/delegates/gpu/common/transformations/remove_noop.h"
 
+#include <any>
+#include <memory>
+#include <string>
+#include <vector>
+
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/status/status.h"
 #include "tensorflow/lite/delegates/gpu/common/data_type.h"
 #include "tensorflow/lite/delegates/gpu/common/model.h"
 #include "tensorflow/lite/delegates/gpu/common/model_transformer.h"
 #include "tensorflow/lite/delegates/gpu/common/operations.h"
+#include "tensorflow/lite/delegates/gpu/common/shape.h"
+#include "tensorflow/lite/delegates/gpu/common/tensor.h"
 
 namespace tflite {
 namespace gpu {
@@ -38,7 +46,7 @@ TEST(RemoveSingleInputAdd, Smoke) {
   Value* output;
   ASSERT_TRUE(AddOutput(&graph, add_node, &output).ok());
   add_node->operation.type = ToString(OperationType::ADD);
-  add_node->operation.attributes = AddAttributes();
+  add_node->operation.attributes = ElementwiseAttributes();
 
   Value* temp;
   ASSERT_TRUE(ConnectTwoNodes(&graph, first_node, add_node, &temp).ok());
@@ -66,7 +74,7 @@ TEST(RemoveSingleInputAdd, DoNotTrigger_TensorHWC) {
   Value* output;
   ASSERT_TRUE(AddOutput(&graph, add_node, &output).ok());
   add_node->operation.type = ToString(OperationType::ADD);
-  AddAttributes attr;
+  ElementwiseAttributes attr;
   attr.param = Tensor<HWC, DataType::FLOAT32>();
   add_node->operation.attributes = attr;
 
@@ -93,7 +101,7 @@ TEST(RemoveSingleInputAdd, DoNotTrigger_LinearTensor) {
   Value* output;
   ASSERT_TRUE(AddOutput(&graph, add_node, &output).ok());
   add_node->operation.type = ToString(OperationType::ADD);
-  AddAttributes attr;
+  ElementwiseAttributes attr;
   attr.param = Tensor<Linear, DataType::FLOAT32>();
   add_node->operation.attributes = attr;
 
@@ -120,7 +128,7 @@ TEST(RemoveSingleInputAdd, DoNotTrigger_Scalar) {
   Value* output;
   ASSERT_TRUE(AddOutput(&graph, add_node, &output).ok());
   add_node->operation.type = ToString(OperationType::ADD);
-  AddAttributes attr;
+  ElementwiseAttributes attr;
   attr.param = 0.5f;
   add_node->operation.attributes = attr;
 

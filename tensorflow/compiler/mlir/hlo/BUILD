@@ -60,7 +60,7 @@ gentbl(
     strip_include_prefix = "include/mlir-hlo/Dialect/mhlo/transforms/",
     tbl_outs = [
         (
-            "-gen-pass-decls",
+            "-gen-pass-decls -name MHLO",
             "include/mlir-hlo/Dialect/mhlo/transforms/mhlo_passes.h.inc",
         ),
     ],
@@ -76,7 +76,7 @@ gentbl(
     strip_include_prefix = "include/mlir-hlo/Dialect/mhlo/transforms/",
     tbl_outs = [
         (
-            "-gen-pass-decls",
+            "-gen-pass-decls -name LMHLO",
             "include/mlir-hlo/Dialect/mhlo/transforms/lmhlo_passes.h.inc",
         ),
     ],
@@ -341,6 +341,7 @@ cc_library(
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:StandardOps",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:Transforms",
     ],
@@ -403,6 +404,7 @@ cc_library(
 cc_library(
     name = "lhlo_legalize_to_llvm",
     srcs = ["lib/Dialect/mhlo/transforms/lhlo_legalize_to_llvm.cc"],
+    hdrs = ["include/mlir-hlo/Dialect/mhlo/transforms/rewriters.h"],
     deps = [
         ":lhlo",
         "@llvm-project//mlir:IR",
@@ -457,6 +459,7 @@ cc_library(
         ":lhlo",
         ":map_lmhlo_to_scalar_op",
         "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:Affine",
         "@llvm-project//mlir:GPUDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:LinalgOps",
@@ -475,9 +478,11 @@ cc_library(
     deps = [
         ":lhlo",
         "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:Affine",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:LinalgTransforms",
         "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:SCFDialect",
         "@llvm-project//mlir:StandardOps",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:TransformUtils",
@@ -758,8 +763,6 @@ cc_library(
         ":lhlo_legalize_to_llvm",  # build-cleaner: keep
         ":materialize_broadcasts",  # build-cleaner: keep
         ":unfuse_batch_norm",  # build-cleaner: keep
-        "@llvm-project//mlir:AffineToStandardTransforms",
-        "@llvm-project//mlir:CFGTransforms",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:InferTypeOpInterface",
         "@llvm-project//mlir:LLVMDialect",
@@ -774,12 +777,12 @@ cc_library(
 )
 
 cc_library(
-    name = "all_passes_for_testing",
+    name = "all_passes",
     hdrs = [
         "include/mlir-hlo/Dialect/mhlo/transforms/register_passes.h",
     ],
     visibility = [
-        "//tensorflow/compiler/mlir:__subpackages__",
+        ":friends",
     ],
     deps = [
         ":LmhloPassIncGen",
@@ -812,8 +815,9 @@ cc_binary(
         "tools/mlir-hlo-opt/mlir-hlo-opt.cpp",
     ],
     deps = [
-        ":all_passes_for_testing",
-        ":hlo_dialect_registration",
+        ":all_passes",
+        ":hlo",
+        ":lhlo",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:AllPassesAndDialectsNoRegistration",
         "@llvm-project//mlir:IR",
