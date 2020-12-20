@@ -22,6 +22,7 @@ import os
 
 import numpy as np
 from six import PY2
+from tensorflow import keras
 
 from google.protobuf import text_format as _text_format
 from google.protobuf.message import DecodeError
@@ -29,19 +30,26 @@ from tensorflow.core.framework import graph_pb2 as _graph_pb2
 from tensorflow.lite.python import convert_saved_model as _convert_saved_model
 from tensorflow.lite.python import lite as _lite
 from tensorflow.lite.python import util as _util
-from tensorflow.python import keras as _keras
 from tensorflow.python.client import session as _session
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework.importer import import_graph_def as _import_graph_def
-from tensorflow.python.keras.preprocessing import image
 from tensorflow.python.lib.io import file_io as _file_io
 from tensorflow.python.platform import resource_loader as _resource_loader
+from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.saved_model import load as _load
 from tensorflow.python.saved_model import loader as _loader
 from tensorflow.python.saved_model import signature_constants as _signature_constants
 from tensorflow.python.saved_model import tag_constants as _tag_constants
+
+
+_GOLDENS_UPDATE_WARNING = """
+  Golden file update requested!
+  This test is now going to write new golden files.
+
+  Make sure to package the updates together with your CL.
+"""
 
 
 def get_filepath(filename, base_dir=None):
@@ -60,6 +68,17 @@ def get_filepath(filename, base_dir=None):
                       base_dir, filename)
 
 
+def get_golden_filepath(name):
+  """Returns the full path to a golden values file.
+
+  Args:
+    name: the name of the golden data, usually same as the test name.
+  """
+  goldens_directory = os.path.join(_resource_loader.get_data_files_path(),
+                                   "testdata", "golden")
+  return os.path.join(goldens_directory, "%s.npy.golden" % name)
+
+
 def get_image(size):
   """Returns an image loaded into an np.ndarray with dims [1, size, size, 3].
 
@@ -71,8 +90,9 @@ def get_image(size):
   """
   img_filename = _resource_loader.get_path_to_datafile(
       "testdata/grace_hopper.jpg")
-  img = image.load_img(img_filename, target_size=(size, size))
-  img_array = image.img_to_array(img)
+  img = keras.preprocessing.image.load_img(
+      img_filename, target_size=(size, size))
+  img_array = keras.preprocessing.image.img_to_array(img)
   img_array = np.expand_dims(img_array, axis=0)
   return img_array
 
@@ -128,11 +148,11 @@ def _convert(converter, **kwargs):
 def _check_model_quantized_to_16x8(tflite_model):
   """Checks that the activations are quantized into int16.
 
-    Args:
-      tflite_model: Serialized TensorFlow Lite model.
+  Args:
+    tflite_model: Serialized TensorFlow Lite model.
 
-    Raises:
-      ValueError: Activations with int16 type are not found.
+  Raises:
+    ValueError: Activations with int16 type are not found.
   """
   interpreter = _get_tflite_interpreter(tflite_model)
   interpreter.allocate_tensors()
@@ -342,7 +362,7 @@ def evaluate_keras_model(filename):
   Returns:
     Lambda function ([np.ndarray data] : [np.ndarray result]).
   """
-  keras_model = _keras.models.load_model(filename)
+  keras_model = keras.models.load_model(filename)
   return lambda input_data: [keras_model.predict(input_data)]
 
 
@@ -435,6 +455,41 @@ def compare_models_v2(tflite_model,
 
   for tf_result, tflite_result in zip(tf_results, tflite_results):
     np.testing.assert_almost_equal(tf_result, tflite_result, tolerance)
+
+
+def compare_model_golden(tflite_model,
+                         input_data,
+                         golden_name,
+                         update_golden=False,
+                         tolerance=5):
+  """Compares the output of a TFLite model against pre-existing golden values.
+
+  Args:
+    tflite_model: Serialized TensorFlow Lite model.
+    input_data: np.ndarray to pass into models during inference.
+    golden_name: Name of the file containing the (expected) golden values.
+    update_golden: Whether to update the golden values with the model output
+      instead of comparing againts them. This should only be done when a change
+      in TFLite warrants it.
+    tolerance: Decimal place to check accuracy to. (default 5).
+  """
+  tflite_results, _ = _evaluate_tflite_model(tflite_model, input_data)
+  golden_file = get_golden_filepath(golden_name)
+  if update_golden:
+    logging.warning(_GOLDENS_UPDATE_WARNING)
+    logging.warning("Updating golden values in file %s.", golden_file)
+    if not os.path.exists(golden_file):
+      golden_relative_path = os.path.relpath(
+          golden_file, _resource_loader.get_root_dir_with_all_resources())
+      logging.warning(
+          "Golden file not found. Manually create it first:\ntouch %r",
+          golden_relative_path)
+
+    with open(golden_file, "wb") as f:
+      np.save(f, tflite_results, allow_pickle=False)
+  else:
+    golden_data = np.load(golden_file, allow_pickle=False)
+    np.testing.assert_almost_equal(golden_data, tflite_results, tolerance)
 
 
 def test_frozen_graph_quant(filename,
@@ -643,10 +698,22 @@ def test_saved_model_v2(directory,
       input_data_range=input_data_range)
 
 
-def test_saved_model_v2_quant_float16(directory, **kwargs):
-  """Validates the TensorFlow SavedModel converts to a TFLite model."""
+def _test_conversion_quant_float16(converter,
+                                   input_data,
+                                   golden_name=None,
+                                   update_golden=False,
+                                   **kwargs):
+  """Validates conversion with float16 quantization.
 
-  converter = _lite.TFLiteConverterV2.from_saved_model(directory)
+  Args:
+    converter: TFLite converter instance for the model to convert.
+    input_data: np.ndarray to pass into models during inference.
+    golden_name: Optional golden values to compare the output of the model
+      against.
+    update_golden: Whether to update the golden values with the model output
+      instead of comparing againts them.
+    **kwargs: Additional arguments to be passed into the converter.
+  """
   tflite_model_float = _convert(converter, version=2, **kwargs)
 
   interpreter_float = _get_tflite_interpreter(tflite_model_float)
@@ -677,6 +744,63 @@ def test_saved_model_v2_quant_float16(directory, **kwargs):
   if not has_quant_tensor:
     raise ValueError("--post_training_quantize flag was unable to quantize the "
                      "graph as expected.")
+
+  if golden_name:
+    compare_model_golden(tflite_model_quant, input_data, golden_name,
+                         update_golden)
+
+
+def test_saved_model_v2_quant_float16(directory,
+                                      input_data,
+                                      golden_name=None,
+                                      update_golden=False,
+                                      **kwargs):
+  """Validates conversion of a saved model to TFLite with float16 quantization.
+
+  Args:
+    directory: SavedModel directory to convert.
+    input_data: np.ndarray to pass into models during inference.
+    golden_name: Optional golden values to compare the output of the model
+      against.
+    update_golden: Whether to update the golden values with the model output
+      instead of comparing againts them.
+    **kwargs: Additional arguments to be passed into the converter.
+  """
+  converter = _lite.TFLiteConverterV2.from_saved_model(directory)
+  _test_conversion_quant_float16(converter, input_data, golden_name,
+                                 update_golden, **kwargs)
+
+
+def test_frozen_graph_quant_float16(filename,
+                                    input_arrays,
+                                    output_arrays,
+                                    input_data,
+                                    input_shapes=None,
+                                    golden_name=None,
+                                    update_golden=False,
+                                    **kwargs):
+  """Validates conversion of a frozen graph to TFLite with float16 quantization.
+
+  Args:
+    filename: Full filepath of file containing frozen GraphDef.
+    input_arrays: List of input tensors to freeze graph with.
+    output_arrays: List of output tensors to freeze graph with.
+    input_data: np.ndarray to pass into models during inference.
+    input_shapes: Dict of strings representing input tensor names to list of
+      integers representing input shapes (e.g., {"foo" : [1, 16, 16, 3]}).
+      Automatically determined when input shapes is None (e.g., {"foo" : None}).
+        (default None)
+    golden_name: Optional golden values to compare the output of the model
+      against.
+    update_golden: Whether to update the golden values with the model output
+      instead of comparing againts them.
+    **kwargs: Additional arguments to be passed into the converter.
+  """
+  converter = _lite.TFLiteConverter.from_frozen_graph(filename, input_arrays,
+                                                      output_arrays,
+                                                      input_shapes)
+  _test_conversion_quant_float16(converter, input_data,
+                                 golden_name, update_golden, **kwargs)
 
 
 def test_keras_model(filename,
@@ -740,7 +864,7 @@ def test_keras_model_v2(filename,
       (half-inclusive). (default None)
     **kwargs: Additional arguments to be passed into the converter.
   """
-  keras_model = _keras.models.load_model(filename)
+  keras_model = keras.models.load_model(filename)
   if input_shapes:
     for tensor, shape in zip(keras_model.inputs, input_shapes):
       tensor.set_shape(shape)

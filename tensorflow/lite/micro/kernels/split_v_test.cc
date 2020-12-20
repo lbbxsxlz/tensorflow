@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -63,13 +63,13 @@ void TestSplitVFloat(const int* input_dims_data, const float* input_data,
   // then come outputs
 
   TfLiteTensor tensors[tensors_size];
-  tensors[0] = CreateFloatTensor(input_data, input_dims);
-  tensors[1] = CreateInt32Tensor(split_data, split_dims);
-  tensors[2] = CreateInt32Tensor(axis_data, axis_dims);
+  tensors[0] = CreateTensor(input_data, input_dims);
+  tensors[1] = CreateTensor(split_data, split_dims);
+  tensors[2] = CreateTensor(axis_data, axis_dims);
 
   // add output tensors
   for (int i = 0; i < N; i++)
-    tensors[3 + i] = CreateFloatTensor(output_tensors.data[i], output_dims[i]);
+    tensors[3 + i] = CreateTensor(output_tensors.data[i], output_dims[i]);
 
   tensors[2].allocation_type = kTfLiteMmapRo;
   tensors[1].allocation_type = kTfLiteMmapRo;

@@ -1,7 +1,10 @@
 # Description:
 #   Contains the Keras engine API (internal TensorFlow version).
 
+# buildifier: disable=same-origin-load
 load("//tensorflow:tensorflow.bzl", "tf_py_test")
+
+# buildifier: disable=same-origin-load
 load("//tensorflow:tensorflow.bzl", "cuda_py_test")
 
 package(
@@ -47,13 +50,13 @@ py_library(
         ":input_spec",
         ":keras_tensor",
         ":node",
-        "//tensorflow/python:composite_tensor_utils",
         "//tensorflow/python:py_checkpoint_reader",
         "//tensorflow/python/data",
         "//tensorflow/python/distribute:distribute_coordinator",
         "//tensorflow/python/distribute:distribute_lib",
         "//tensorflow/python/distribute:input_lib",
         "//tensorflow/python/distribute:parameter_server_strategy",
+        "//tensorflow/python/distribute:parameter_server_strategy_v2",
         "//tensorflow/python/distribute:reduce_util",
         "//tensorflow/python/eager:monitoring",
         "//tensorflow/python/keras:activations",
@@ -67,9 +70,9 @@ py_library(
         "//tensorflow/python/keras:optimizers",
         "//tensorflow/python/keras:regularizers",
         "//tensorflow/python/keras/distribute",
-        "//tensorflow/python/keras/mixed_precision/experimental:autocast_variable",
-        "//tensorflow/python/keras/mixed_precision/experimental:loss_scale_optimizer",
-        "//tensorflow/python/keras/mixed_precision/experimental:policy",
+        "//tensorflow/python/keras/mixed_precision:autocast_variable",
+        "//tensorflow/python/keras/mixed_precision:loss_scale_optimizer",
+        "//tensorflow/python/keras/mixed_precision:policy",
         "//tensorflow/python/keras/saving",
         "//tensorflow/python/keras/utils:engine_utils",
         "//tensorflow/python/keras/utils:metrics_utils",
@@ -80,6 +83,8 @@ py_library(
         "//tensorflow/python/ops/ragged:ragged_tensor",
         "//tensorflow/python/ops/ragged:ragged_util",
         "//tensorflow/python/profiler:trace",
+        "//tensorflow/python/saved_model:constants",
+        "//tensorflow/python/saved_model:loader",
         "//tensorflow/python/tpu:tpu_lib",
         "//tensorflow/python/training/tracking:data_structures",
         "//tensorflow/tools/docs:doc_controls",
@@ -135,7 +140,7 @@ py_library(
         "//tensorflow/python:tensor_spec",
         "//tensorflow/python:tensor_util",
         "//tensorflow/python:tf2",
-        "//tensorflow/python:tf_export",
+        "//tensorflow/python/util:tf_export",
         "//tensorflow/python:util",
         "//tensorflow/python:variables",
         "//tensorflow/python/autograph/core",
@@ -152,12 +157,13 @@ py_library(
         # TODO(keras-team): Fix the cyclar deps between layer and metrics.
         # "//tensorflow/python/keras:metrics",
         "//tensorflow/python/keras:regularizers",
-        "//tensorflow/python/keras/mixed_precision/experimental:autocast_variable",
-        "//tensorflow/python/keras/mixed_precision/experimental:loss_scale_optimizer",
-        "//tensorflow/python/keras/mixed_precision/experimental:policy",
+        "//tensorflow/python/keras/mixed_precision:autocast_variable",
+        "//tensorflow/python/keras/mixed_precision:loss_scale_optimizer",
+        "//tensorflow/python/keras/mixed_precision:policy",
         "//tensorflow/python/keras/saving",
         "//tensorflow/python/keras/utils:generic_utils",
         "//tensorflow/python/keras/utils:layer_utils",
+        "//tensorflow/python/keras/utils:object_identity",
         "//tensorflow/python/keras/utils:tf_utils",
         "//tensorflow/python/keras/utils:version_utils",
         "//tensorflow/python/module",
@@ -205,6 +211,7 @@ py_library(
         "//tensorflow/python:dtypes",
         "//tensorflow/python:lib",
         "//tensorflow/python:tensor_spec",
+        "//tensorflow/python/keras/utils:object_identity",
         "@six_archive//:six",
     ],
 )
@@ -218,7 +225,6 @@ py_library(
     srcs_version = "PY2AND3",
     deps = [
         ":base_layer",
-        "//tensorflow/python:composite_tensor_utils",
         "//tensorflow/python/data",
         "//tensorflow/python/eager:monitoring",
         "//tensorflow/python/keras:backend",
@@ -302,6 +308,9 @@ cuda_py_test(
     tags = [
         "nomac",  # TODO(mihaimaruseac): b/127695564
     ],
+    xla_tags = [
+        "no_cuda_asan",  # times out
+    ],
     deps = [
         ":engine",
         "//tensorflow/python:client_testlib",
@@ -340,7 +349,6 @@ tf_py_test(
     tags = [
         "nomac",  # TODO(mihaimaruseac): b/127695564
     ],
-    tfrt_enabled = True,
     deps = [
         "//tensorflow/python:client_testlib",
         "//tensorflow/python/keras",
@@ -356,7 +364,6 @@ tf_py_test(
     tags = [
         "nomac",  # TODO(mihaimaruseac): b/127695564
     ],
-    tfrt_enabled = True,
     deps = [
         "//tensorflow/python:client_testlib",
         "//tensorflow/python/keras",
@@ -372,7 +379,6 @@ tf_py_test(
     tags = [
         "nomac",  # TODO(mihaimaruseac): b/127695564
     ],
-    tfrt_enabled = True,
     deps = [
         "//tensorflow/python:client_testlib",
         "//tensorflow/python/keras",
@@ -641,7 +647,6 @@ tf_py_test(
     tags = [
         "nomac",  # TODO(mihaimaruseac): b/127695564
     ],
-    tfrt_enabled = True,
     deps = [
         ":base_layer",
         ":engine",
@@ -691,7 +696,7 @@ tf_py_test(
         "//tensorflow/python/keras:testing_utils",
         "//tensorflow/python/keras/layers",
         "//tensorflow/python/keras/legacy_tf_layers:core",
-        "//tensorflow/python/keras/mixed_precision/experimental:policy",
+        "//tensorflow/python/keras/mixed_precision:policy",
         "//tensorflow/python/keras/optimizer_v2",
         "//tensorflow/python/keras/utils:tf_utils",
         "//tensorflow/python/ops/ragged:ragged_tensor",

@@ -81,6 +81,44 @@ class QuantizeModelTest : public testing::Test {
   internal::FailOnErrorReporter error_reporter_;
 };
 
+void ExpectSameModels(const ModelT& model, const ModelT& expected_model) {
+  ASSERT_EQ(model.subgraphs.size(), expected_model.subgraphs.size());
+  for (size_t subgraph_idx = 0; subgraph_idx < model.subgraphs.size();
+       subgraph_idx++) {
+    const auto graph = model.subgraphs[subgraph_idx].get();
+    const auto expected_graph = expected_model.subgraphs[subgraph_idx].get();
+    ASSERT_EQ(graph->tensors.size(), expected_graph->tensors.size());
+    for (size_t i = 0; i < graph->tensors.size(); i++) {
+      const auto tensor = graph->tensors[i].get();
+      const auto expected_tensor = expected_graph->tensors[i].get();
+      EXPECT_EQ(tensor->buffer, expected_tensor->buffer);
+      EXPECT_EQ(tensor->is_variable, expected_tensor->is_variable);
+      EXPECT_EQ(tensor->shape, expected_tensor->shape);
+      EXPECT_EQ(tensor->name, expected_tensor->name);
+      EXPECT_EQ(tensor->type, expected_tensor->type);
+      const auto quantization_params = tensor->quantization.get();
+      const auto expected_quantization_params =
+          expected_tensor->quantization.get();
+      if (quantization_params != nullptr ||
+          expected_quantization_params != nullptr) {
+        EXPECT_NE(quantization_params, nullptr);
+        EXPECT_NE(expected_quantization_params, nullptr);
+        EXPECT_EQ(quantization_params->scale,
+                  expected_quantization_params->scale);
+        EXPECT_EQ(quantization_params->zero_point,
+                  expected_quantization_params->zero_point);
+      }
+    }
+  }
+  ASSERT_EQ(model.buffers.size(), expected_model.buffers.size());
+  for (size_t buffer_idx = 0; buffer_idx < model.buffers.size(); ++buffer_idx) {
+    const auto buffer = model.buffers[buffer_idx].get()->data;
+    const auto expected_buffer = expected_model.buffers[buffer_idx].get()->data;
+    EXPECT_EQ(buffer, expected_buffer);
+  }
+  // TODO(jianlijianli): Compare operators as well.
+}
+
 class QuantizeConvModelTest : public QuantizeModelTest,
                               public testing::WithParamInterface<TensorType> {
  protected:
@@ -1121,42 +1159,7 @@ TEST_F(QuantizeLSTMTest, VerifyLSTM) {
   ModelT expected_model;
   expected_read_only_model->UnPackTo(&expected_model);
 
-  // Comparison.
-  ASSERT_EQ(model_.subgraphs.size(), expected_model.subgraphs.size());
-  for (size_t subgraph_idx = 0; subgraph_idx < model_.subgraphs.size();
-       subgraph_idx++) {
-    const auto graph = model_.subgraphs[subgraph_idx].get();
-    const auto expected_graph = expected_model.subgraphs[subgraph_idx].get();
-    ASSERT_EQ(graph->tensors.size(), expected_graph->tensors.size());
-    for (size_t i = 0; i < graph->tensors.size(); i++) {
-      const auto tensor = graph->tensors[i].get();
-      const auto expected_tensor = expected_graph->tensors[i].get();
-      EXPECT_EQ(tensor->buffer, expected_tensor->buffer);
-      EXPECT_EQ(tensor->is_variable, expected_tensor->is_variable);
-      EXPECT_EQ(tensor->shape, expected_tensor->shape);
-      EXPECT_EQ(tensor->name, expected_tensor->name);
-      EXPECT_EQ(tensor->type, expected_tensor->type);
-      const auto quantization_params = tensor->quantization.get();
-      const auto expected_quantization_params =
-          expected_tensor->quantization.get();
-      if (quantization_params != nullptr ||
-          expected_quantization_params != nullptr) {
-        EXPECT_NE(quantization_params, nullptr);
-        EXPECT_NE(expected_quantization_params, nullptr);
-        EXPECT_EQ(quantization_params->scale,
-                  expected_quantization_params->scale);
-        EXPECT_EQ(quantization_params->zero_point,
-                  expected_quantization_params->zero_point);
-      }
-    }
-  }
-  ASSERT_EQ(model_.buffers.size(), expected_model.buffers.size());
-  for (size_t buffer_idx = 0; buffer_idx < model_.buffers.size();
-       ++buffer_idx) {
-    const auto buffer = model_.buffers[buffer_idx].get()->data;
-    const auto expected_buffer = expected_model.buffers[buffer_idx].get()->data;
-    EXPECT_EQ(buffer, expected_buffer);
-  }
+  ExpectSameModels(model_, expected_model);
 }
 
 class QuantizeLSTM2Test : public QuantizeModelTest {
@@ -1181,42 +1184,34 @@ TEST_F(QuantizeLSTM2Test, VerifyLSTM) {
   ModelT expected_model;
   expected_read_only_model->UnPackTo(&expected_model);
 
-  // Comparison.
-  ASSERT_EQ(model_.subgraphs.size(), expected_model.subgraphs.size());
-  for (size_t subgraph_idx = 0; subgraph_idx < model_.subgraphs.size();
-       subgraph_idx++) {
-    const auto graph = model_.subgraphs[subgraph_idx].get();
-    const auto expected_graph = expected_model.subgraphs[subgraph_idx].get();
-    ASSERT_EQ(graph->tensors.size(), expected_graph->tensors.size());
-    for (size_t i = 0; i < graph->tensors.size(); i++) {
-      const auto tensor = graph->tensors[i].get();
-      const auto expected_tensor = expected_graph->tensors[i].get();
-      EXPECT_EQ(tensor->buffer, expected_tensor->buffer);
-      EXPECT_EQ(tensor->is_variable, expected_tensor->is_variable);
-      EXPECT_EQ(tensor->shape, expected_tensor->shape);
-      EXPECT_EQ(tensor->name, expected_tensor->name);
-      EXPECT_EQ(tensor->type, expected_tensor->type);
-      const auto quantization_params = tensor->quantization.get();
-      const auto expected_quantization_params =
-          expected_tensor->quantization.get();
-      if (quantization_params != nullptr ||
-          expected_quantization_params != nullptr) {
-        EXPECT_NE(quantization_params, nullptr);
-        EXPECT_NE(expected_quantization_params, nullptr);
-        EXPECT_EQ(quantization_params->scale,
-                  expected_quantization_params->scale);
-        EXPECT_EQ(quantization_params->zero_point,
-                  expected_quantization_params->zero_point);
-      }
-    }
+  ExpectSameModels(model_, expected_model);
+}
+
+class QuantizeUnidirectionalSequenceLSTMTest : public QuantizeModelTest {
+ protected:
+  QuantizeUnidirectionalSequenceLSTMTest() {
+    input_model_ = ReadModel(internal::kUnidirectionalSequenceLstmCalibrated);
+    readonly_model_ = input_model_->GetModel();
+    readonly_model_->UnPackTo(&model_);
   }
-  ASSERT_EQ(model_.buffers.size(), expected_model.buffers.size());
-  for (size_t buffer_idx = 0; buffer_idx < model_.buffers.size();
-       ++buffer_idx) {
-    const auto buffer = model_.buffers[buffer_idx].get()->data;
-    const auto expected_buffer = expected_model.buffers[buffer_idx].get()->data;
-    EXPECT_EQ(buffer, expected_buffer);
-  }
+};
+
+TEST_F(QuantizeUnidirectionalSequenceLSTMTest,
+       VerifyUnidirectionalSequenceLSTM) {
+  // Quantize model.
+  auto status = QuantizeModelAllOperators(
+      &builder_, &model_, TensorType_FLOAT32, TensorType_FLOAT32, false,
+      TensorType_INT8, &error_reporter_);
+  ASSERT_EQ(kTfLiteOk, status);
+
+  // Read expected model.
+  auto expected_fb_model =
+      ReadModel(internal::kUnidirectionalSequenceLstmQuantized);
+  auto expected_read_only_model = expected_fb_model->GetModel();
+  ModelT expected_model;
+  expected_read_only_model->UnPackTo(&expected_model);
+
+  ExpectSameModels(model_, expected_model);
 }
 
 class QuantizeSVDFTest : public QuantizeModelTest {
@@ -1642,6 +1637,64 @@ TEST_F(QuantizeTransposeTest, VerifyTranspose) {
                   transpose_output->quantization->scale[0]);
   EXPECT_EQ(transpose_input->quantization->zero_point[0],
             transpose_output->quantization->zero_point[0]);
+}
+
+class QuantizeQatTest : public QuantizeModelTest {
+ protected:
+  QuantizeQatTest() {
+    input_model_ = ReadModel(internal::kQatModelWithFc);
+    readonly_model_ = input_model_->GetModel();
+    readonly_model_->UnPackTo(&model_);
+  }
+};
+
+TEST_F(QuantizeQatTest, VerifySingleQuantize) {
+  auto status = QuantizeModelAllOperators(
+      &builder_, &model_, TensorType_FLOAT32, TensorType_FLOAT32, false,
+      TensorType_INT8, &error_reporter_);
+  ASSERT_EQ(kTfLiteOk, status);
+
+  const auto& subgraph = model_.subgraphs[0];
+  auto op = subgraph->operators[0].get();
+  ASSERT_EQ(GetBuiltinCode(model_.operator_codes[op->opcode_index].get()),
+            BuiltinOperator_QUANTIZE);
+  op = subgraph->operators[1].get();
+  ASSERT_EQ(GetBuiltinCode(model_.operator_codes[op->opcode_index].get()),
+            BuiltinOperator_RESHAPE);
+  op = subgraph->operators[2].get();
+  ASSERT_EQ(GetBuiltinCode(model_.operator_codes[op->opcode_index].get()),
+            BuiltinOperator_FULLY_CONNECTED);
+
+  ASSERT_EQ(op->inputs.size(), 3);
+  ASSERT_EQ(op->outputs.size(), 1);
+
+  auto qat_graph = readonly_model_->subgraphs()->Get(0);
+  // Verify FC input and weight is quantized.
+  ASSERT_EQ(qat_graph->tensors()->Get(op->inputs[0])->type(), TensorType_INT8);
+  EXPECT_EQ(subgraph->tensors[op->inputs[0]].get()->type, TensorType_INT8);
+  ASSERT_EQ(qat_graph->tensors()->Get(op->inputs[1])->type(), TensorType_INT8);
+  EXPECT_EQ(subgraph->tensors[op->inputs[1]].get()->type, TensorType_INT8);
+
+  // Verify FC bias should be int32 quantized.
+  ASSERT_EQ(qat_graph->tensors()->Get(op->inputs[2])->type(), TensorType_INT32);
+  EXPECT_EQ(subgraph->tensors[op->inputs[2]].get()->type, TensorType_INT32);
+
+  // The output of FC should be quantized.
+  ASSERT_EQ(qat_graph->tensors()->Get(op->outputs[0])->type(), TensorType_INT8);
+  EXPECT_EQ(subgraph->tensors[op->outputs[0]].get()->type, TensorType_INT8);
+
+  // check op and versioning.
+  EXPECT_EQ(model_.operator_codes.size(), 4);
+  EXPECT_EQ(GetBuiltinCode(model_.operator_codes[0].get()),
+            BuiltinOperator_QUANTIZE);
+  EXPECT_EQ(GetBuiltinCode(model_.operator_codes[1].get()),
+            BuiltinOperator_RESHAPE);
+  EXPECT_EQ(GetBuiltinCode(model_.operator_codes[2].get()),
+            BuiltinOperator_FULLY_CONNECTED);
+  EXPECT_EQ(GetBuiltinCode(model_.operator_codes[3].get()),
+            BuiltinOperator_DEQUANTIZE);
+  EXPECT_EQ(model_.operator_codes[1]->version, 1);
+  EXPECT_EQ(model_.operator_codes[2]->version, 4);
 }
 
 }  // namespace

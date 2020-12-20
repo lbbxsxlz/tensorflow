@@ -37,7 +37,7 @@ namespace strided_slice {
 
 enum KernelType {
   kReference,
-  // TODO(soroosh): add kGenericOptimized
+  // TODO(b/175642009): add kGenericOptimized
 };
 
 constexpr int kInputTensor = 0;
@@ -154,7 +154,7 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
   TF_LITE_ENSURE_EQ(context, NumDimensions(op_context.strides), 1);
   TF_LITE_ENSURE_EQ(context, op_context.input->type, op_context.output->type);
   // Only INT32 begin/end/strides are supported
-  // TODO(soroosh) add support for INT64
+  // TODO(b/175642009): add support for INT64
   TF_LITE_ENSURE_TYPES_EQ(context, op_context.begin->type, kTfLiteInt32);
   TF_LITE_ENSURE_TYPES_EQ(context, op_context.end->type, kTfLiteInt32);
   TF_LITE_ENSURE_TYPES_EQ(context, op_context.strides->type, kTfLiteInt32);
@@ -190,11 +190,10 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
   }
   StridedSliceParams op_params = BuildStridedSliceParams(&op_context);
 
-#define TF_LITE_STRIDED_SLICE(kernel_type, data_type)                    \
-  kernel_type::StridedSlice(op_params, GetTensorShape(op_context.input), \
-                            GetTensorData<data_type>(op_context.input),  \
-                            GetTensorShape(op_context.output),           \
-                            GetTensorData<data_type>(op_context.output))
+#define TF_LITE_STRIDED_SLICE(kernel_type, data_type)                \
+  kernel_type::StridedSlice<data_type>(                              \
+      op_params, GetTensorShape(op_context.input), op_context.input, \
+      GetTensorShape(op_context.output), op_context.output)
 
   switch (op_context.input->type) {
     case kTfLiteFloat32:
@@ -232,6 +231,11 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
         TF_LITE_STRIDED_SLICE(reference_ops, bool);
       }
       break;
+    case kTfLiteString:
+      if (kernel_type == kReference) {
+        TF_LITE_STRIDED_SLICE(reference_ops, string);
+      }
+      break;
     default:
       TF_LITE_KERNEL_LOG(context,
                          "Type %s is currently not supported "
@@ -252,7 +256,6 @@ TfLiteRegistration* Register_STRIDED_SLICE_REF() {
   return &r;
 }
 
-// TODO(soroosh): add optimized
 TfLiteRegistration* Register_STRIDED_SLICE() {
   return Register_STRIDED_SLICE_REF();
 }

@@ -92,6 +92,7 @@ TfLiteStatus ValidateConvGoldens(TfLiteTensor* tensors, int tensors_size,
   return kTfLiteOk;
 }
 
+#if !defined(XTENSA)  // Needed to avoid build errors from unused functions.
 void TestConvFloat(const int* input_dims_data, const float* input_data,
                    const int* filter_dims_data, const float* filter_data,
                    const int* bias_dims_data, const float* bias_data,
@@ -107,10 +108,10 @@ void TestConvFloat(const int* input_dims_data, const float* input_data,
   constexpr int outputs_size = 1;
   constexpr int tensors_size = inputs_size + outputs_size;
   TfLiteTensor tensors[tensors_size] = {
-      CreateFloatTensor(input_data, input_dims),
-      CreateFloatTensor(filter_data, filter_dims),
-      CreateFloatTensor(bias_data, bias_dims),
-      CreateFloatTensor(output_data, output_dims),
+      CreateTensor(input_data, input_dims),
+      CreateTensor(filter_data, filter_dims),
+      CreateTensor(bias_data, bias_dims),
+      CreateTensor(output_data, output_dims),
   };
 
   TF_LITE_MICRO_EXPECT_EQ(
@@ -133,8 +134,8 @@ void TestConvQuantizedPerLayer(
   TfLiteIntArray* output_dims = IntArrayFromInts(output_dims_data);
   const int output_dims_count = ElementCount(*output_dims);
 
-  tflite::AsymmetricQuantize(expected_output_data, expected_output_quantized,
-                             output_dims_count, output_scale, 128);
+  tflite::Quantize(expected_output_data, expected_output_quantized,
+                   output_dims_count, output_scale, 128);
 
   constexpr int inputs_size = 3;
   constexpr int outputs_size = 1;
@@ -218,15 +219,15 @@ void TestConvQuantizedPerChannel(
       output_tensor,
   };
 
-  tflite::AsymmetricQuantize(expected_output_data,
-                             expected_output_data_quantized, output_dims_count,
-                             output_scale, output_zero_point);
+  tflite::Quantize(expected_output_data, expected_output_data_quantized,
+                   output_dims_count, output_scale, output_zero_point);
   TF_LITE_MICRO_EXPECT_EQ(
       kTfLiteOk,
       ValidateConvGoldens(tensors, tensors_size, expected_output_data_quantized,
                           output_data, output_dims_count, conv_params,
                           1.0 /* tolerance */));
 }
+#endif  // !defined(XTENSA)
 
 }  // namespace
 }  // namespace testing
@@ -234,6 +235,9 @@ void TestConvQuantizedPerChannel(
 
 TF_LITE_MICRO_TESTS_BEGIN
 
+#if !defined(XTENSA)  // TODO(b/170321206): xtensa kernels are less general than
+                      // reference kernels and we ifdef out test cases that are
+                      // currently known to fail.
 TF_LITE_MICRO_TEST(SimpleTestFloat) {
   float output_data[tflite::testing::kOutputElements];
 
@@ -286,8 +290,8 @@ TF_LITE_MICRO_TEST(SimpleTestQuantized) {
 }
 
 TF_LITE_MICRO_TEST(InputOutputDifferentTypeIsError) {
-  using tflite::testing::CreateFloatTensor;
   using tflite::testing::CreateQuantizedTensor;
+  using tflite::testing::CreateTensor;
   using tflite::testing::IntArrayFromInts;
 
   TfLiteIntArray* input_dims = IntArrayFromInts(tflite::testing::kInputShape);
@@ -301,9 +305,9 @@ TF_LITE_MICRO_TEST(InputOutputDifferentTypeIsError) {
 
   int8_t output_data[tflite::testing::kOutputElements];
   TfLiteTensor tensors[tensors_size] = {
-      CreateFloatTensor(tflite::testing::kInputData, input_dims),
-      CreateFloatTensor(tflite::testing::kFilterData, filter_dims),
-      CreateFloatTensor(tflite::testing::kBiasData, bias_dims),
+      CreateTensor(tflite::testing::kInputData, input_dims),
+      CreateTensor(tflite::testing::kFilterData, filter_dims),
+      CreateTensor(tflite::testing::kBiasData, bias_dims),
       CreateQuantizedTensor(output_data, output_dims, /*scale=*/0.0f,
                             /*zero_point=*/0),
   };
@@ -314,8 +318,8 @@ TF_LITE_MICRO_TEST(InputOutputDifferentTypeIsError) {
 }
 
 TF_LITE_MICRO_TEST(HybridModeIsError) {
-  using tflite::testing::CreateFloatTensor;
   using tflite::testing::CreateQuantizedTensor;
+  using tflite::testing::CreateTensor;
   using tflite::testing::IntArrayFromInts;
 
   TfLiteIntArray* input_dims = IntArrayFromInts(tflite::testing::kInputShape);
@@ -330,12 +334,12 @@ TF_LITE_MICRO_TEST(HybridModeIsError) {
   int8_t filter_data[tflite::testing::kFilterElements] = {};
   float output_data[tflite::testing::kOutputElements];
   TfLiteTensor tensors[tensors_size] = {
-      CreateFloatTensor(tflite::testing::kInputData, input_dims),
+      CreateTensor(tflite::testing::kInputData, input_dims),
       CreateQuantizedTensor(filter_data, filter_dims,
                             /*scale=*/0.0f,
                             /*zero_point=*/0),
-      CreateFloatTensor(tflite::testing::kBiasData, bias_dims),
-      CreateFloatTensor(output_data, output_dims),
+      CreateTensor(tflite::testing::kBiasData, bias_dims),
+      CreateTensor(output_data, output_dims),
   };
   TF_LITE_MICRO_EXPECT_EQ(
       kTfLiteError, tflite::testing::InvokeConv(
@@ -574,6 +578,94 @@ TF_LITE_MICRO_TEST(Kernel1x1QuantizedPerChannelRelu6) {
       &conv_params);
 }
 
+TF_LITE_MICRO_TEST(BroadcastPerLayerQuantizationToPerChannelShouldMatchGolden) {
+  const int output_dims_count = 12;
+  int8_t output_data[output_dims_count];
+
+  const float input_scale = 1.0f;
+  const float filter_scale = 1.0f;
+  const float output_scale = 1.0f;
+
+  int8_t input_quantized[tflite::testing::kInputElements];
+  int8_t filter_quantized[tflite::testing::kFilterElements];
+  int32_t bias_quantized[tflite::testing::kBiasElements];
+  int8_t golden_quantized[tflite::testing::kOutputElements];
+
+  TfLiteIntArray* input_dims =
+      tflite::testing::IntArrayFromInts(tflite::testing::kInputShape);
+  TfLiteIntArray* filter_dims =
+      tflite::testing::IntArrayFromInts(tflite::testing::kFilterShape);
+  TfLiteIntArray* bias_dims =
+      tflite::testing::IntArrayFromInts(tflite::testing::kBiasShape);
+  TfLiteIntArray* output_dims =
+      tflite::testing::IntArrayFromInts(tflite::testing::kOutputShape);
+
+  // Create per-layer quantized int8_t input tensor.
+  TfLiteTensor input_tensor = tflite::testing::CreateQuantizedTensor(
+      tflite::testing::kInputData, input_quantized, input_dims, input_scale, 0);
+  int input_zero_points[2] = {1, 0};
+  float input_scales[2] = {1, input_scale};
+  TfLiteAffineQuantization input_quant = {
+      tflite::testing::FloatArrayFromFloats(input_scales),
+      tflite::testing::IntArrayFromInts(input_zero_points), 0};
+  input_tensor.quantization = {kTfLiteAffineQuantization, &input_quant};
+
+  // Create per-layer quantized int8_t filter tensor.
+  TfLiteTensor filter_tensor = tflite::testing::CreateQuantizedTensor(
+      tflite::testing::kFilterData, filter_quantized, filter_dims, filter_scale,
+      0);
+  int filter_zero_points[2] = {1, 0};
+  float filter_scales[2] = {1, filter_scale};
+  TfLiteAffineQuantization filter_quant = {
+      tflite::testing::FloatArrayFromFloats(filter_scales),
+      tflite::testing::IntArrayFromInts(filter_zero_points), 0};
+  filter_tensor.quantization = {kTfLiteAffineQuantization, &filter_quant};
+
+  // Create per-layer quantized int32_t bias tensor.
+  tflite::SymmetricQuantize(tflite::testing::kBiasData, bias_quantized,
+                            tflite::testing::kBiasElements,
+                            input_scale * output_scale);
+  TfLiteTensor bias_tensor =
+      tflite::testing::CreateTensor(bias_quantized, bias_dims);
+
+  int bias_zero_points[2] = {1, 0};
+  float bias_scales[2] = {1, input_scale * filter_scale};
+  TfLiteAffineQuantization bias_quant = {
+      tflite::testing::FloatArrayFromFloats(bias_scales),
+      tflite::testing::IntArrayFromInts(bias_zero_points), 0};
+  bias_tensor.quantization = {kTfLiteAffineQuantization, &bias_quant};
+
+  // Create per-layer quantized int8_t output tensor.
+  TfLiteTensor output_tensor = tflite::testing::CreateQuantizedTensor(
+      output_data, output_dims, output_scale, 0 /* quantized dimension */);
+  int output_zero_points[2] = {1, 0};
+  float output_scales[2] = {1, output_scale};
+  TfLiteAffineQuantization output_quant = {
+      tflite::testing::FloatArrayFromFloats(output_scales),
+      tflite::testing::IntArrayFromInts(output_zero_points), 0};
+  output_tensor.quantization = {kTfLiteAffineQuantization, &output_quant};
+
+  constexpr int inputs_size = 3;
+  constexpr int outputs_size = 1;
+  constexpr int tensors_size = inputs_size + outputs_size;
+  TfLiteTensor tensors[tensors_size] = {
+      input_tensor,
+      filter_tensor,
+      bias_tensor,
+      output_tensor,
+  };
+
+  tflite::Quantize(tflite::testing::kGoldenData, golden_quantized,
+                   output_dims_count, output_scale, 0);
+
+  TF_LITE_MICRO_EXPECT_EQ(
+      kTfLiteOk, tflite::testing::ValidateConvGoldens(
+                     tensors, tensors_size, golden_quantized, output_data,
+                     output_dims_count, &tflite::testing::common_conv_params));
+}
+
+#endif  // !defined(XTENSA)
+
 TF_LITE_MICRO_TEST(FilterDimsNotMatchingAffineQuantization) {
   const int output_dims_count = 12;
   int8_t output_data[output_dims_count];
@@ -632,8 +724,8 @@ TF_LITE_MICRO_TEST(FilterDimsNotMatchingAffineQuantization) {
       output_tensor,
   };
 
-  tflite::AsymmetricQuantize(tflite::testing::kGoldenData, golden_quantized,
-                             output_dims_count, output_scale, 0);
+  tflite::Quantize(tflite::testing::kGoldenData, golden_quantized,
+                   output_dims_count, output_scale, 0);
 
   // Set filter quant to mismatched dimension.
   TfLiteAffineQuantization* quant = reinterpret_cast<TfLiteAffineQuantization*>(
@@ -656,92 +748,6 @@ TF_LITE_MICRO_TEST(FilterDimsNotMatchingAffineQuantization) {
       tflite::testing::ValidateConvGoldens(
           tensors, tensors_size, golden_quantized, output_data,
           output_dims_count, &tflite::testing::common_conv_params));
-}
-
-TF_LITE_MICRO_TEST(BroadcastPerLayerQuantizationToPerChannelShouldMatchGolden) {
-  const int output_dims_count = 12;
-  int8_t output_data[output_dims_count];
-
-  const float input_scale = 1.0f;
-  const float filter_scale = 1.0f;
-  const float output_scale = 1.0f;
-
-  int8_t input_quantized[tflite::testing::kInputElements];
-  int8_t filter_quantized[tflite::testing::kFilterElements];
-  int32_t bias_quantized[tflite::testing::kBiasElements];
-  int8_t golden_quantized[tflite::testing::kOutputElements];
-
-  TfLiteIntArray* input_dims =
-      tflite::testing::IntArrayFromInts(tflite::testing::kInputShape);
-  TfLiteIntArray* filter_dims =
-      tflite::testing::IntArrayFromInts(tflite::testing::kFilterShape);
-  TfLiteIntArray* bias_dims =
-      tflite::testing::IntArrayFromInts(tflite::testing::kBiasShape);
-  TfLiteIntArray* output_dims =
-      tflite::testing::IntArrayFromInts(tflite::testing::kOutputShape);
-
-  // Create per-layer quantized int8_t input tensor.
-  TfLiteTensor input_tensor = tflite::testing::CreateQuantizedTensor(
-      tflite::testing::kInputData, input_quantized, input_dims, input_scale, 0);
-  int input_zero_points[2] = {1, 0};
-  float input_scales[2] = {1, input_scale};
-  TfLiteAffineQuantization input_quant = {
-      tflite::testing::FloatArrayFromFloats(input_scales),
-      tflite::testing::IntArrayFromInts(input_zero_points), 0};
-  input_tensor.quantization = {kTfLiteAffineQuantization, &input_quant};
-
-  // Create per-layer quantized int8_t filter tensor.
-  TfLiteTensor filter_tensor = tflite::testing::CreateQuantizedTensor(
-      tflite::testing::kFilterData, filter_quantized, filter_dims, filter_scale,
-      0);
-  int filter_zero_points[2] = {1, 0};
-  float filter_scales[2] = {1, filter_scale};
-  TfLiteAffineQuantization filter_quant = {
-      tflite::testing::FloatArrayFromFloats(filter_scales),
-      tflite::testing::IntArrayFromInts(filter_zero_points), 0};
-  filter_tensor.quantization = {kTfLiteAffineQuantization, &filter_quant};
-
-  // Create per-layer quantized int32_t bias tensor.
-  tflite::SymmetricQuantize(tflite::testing::kBiasData, bias_quantized,
-                            tflite::testing::kBiasElements,
-                            input_scale * output_scale);
-  TfLiteTensor bias_tensor =
-      tflite::testing::CreateInt32Tensor(bias_quantized, bias_dims);
-
-  int bias_zero_points[2] = {1, 0};
-  float bias_scales[2] = {1, input_scale * filter_scale};
-  TfLiteAffineQuantization bias_quant = {
-      tflite::testing::FloatArrayFromFloats(bias_scales),
-      tflite::testing::IntArrayFromInts(bias_zero_points), 0};
-  bias_tensor.quantization = {kTfLiteAffineQuantization, &bias_quant};
-
-  // Create per-layer quantized int8_t output tensor.
-  TfLiteTensor output_tensor = tflite::testing::CreateQuantizedTensor(
-      output_data, output_dims, output_scale, 0 /* quantized dimension */);
-  int output_zero_points[2] = {1, 0};
-  float output_scales[2] = {1, output_scale};
-  TfLiteAffineQuantization output_quant = {
-      tflite::testing::FloatArrayFromFloats(output_scales),
-      tflite::testing::IntArrayFromInts(output_zero_points), 0};
-  output_tensor.quantization = {kTfLiteAffineQuantization, &output_quant};
-
-  constexpr int inputs_size = 3;
-  constexpr int outputs_size = 1;
-  constexpr int tensors_size = inputs_size + outputs_size;
-  TfLiteTensor tensors[tensors_size] = {
-      input_tensor,
-      filter_tensor,
-      bias_tensor,
-      output_tensor,
-  };
-
-  tflite::AsymmetricQuantize(tflite::testing::kGoldenData, golden_quantized,
-                             output_dims_count, output_scale, 0);
-
-  TF_LITE_MICRO_EXPECT_EQ(
-      kTfLiteOk, tflite::testing::ValidateConvGoldens(
-                     tensors, tensors_size, golden_quantized, output_data,
-                     output_dims_count, &tflite::testing::common_conv_params));
 }
 
 TF_LITE_MICRO_TEST(Int8Input32x1Filter32x32ShouldMatchGolden) {
@@ -832,7 +838,7 @@ TF_LITE_MICRO_TEST(Int8Input32x1Filter32x32ShouldMatchGolden) {
   tflite::SymmetricQuantize(bias_values, bias_quantized, kSampleSize,
                             input_scale * output_scale);
   TfLiteTensor bias_tensor =
-      tflite::testing::CreateInt32Tensor(bias_quantized, bias_dims);
+      tflite::testing::CreateTensor(bias_quantized, bias_dims);
 
   // There is a single zero point of 0, and a single scale of
   // input_scale * filter_scale.
@@ -867,9 +873,8 @@ TF_LITE_MICRO_TEST(Int8Input32x1Filter32x32ShouldMatchGolden) {
   };
 
   int8_t golden_quantized[kSampleSize];
-  tflite::AsymmetricQuantize(expected_output, golden_quantized,
-                             output_dims_count, output_scale,
-                             output_zero_point);
+  tflite::Quantize(expected_output, golden_quantized, output_dims_count,
+                   output_scale, output_zero_point);
 
   // Rounding errors due to quantization should not exceed 1.
   constexpr int kQuantizationTolerance = 1;

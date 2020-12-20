@@ -400,6 +400,8 @@ class MemorySpaceAssignment {
       GlobalDecreasingSizeBestFitHeap<HloValue>::BufferIntervalCompare;
   using IsAllowedInAlternateMemoryFunction =
       std::function<bool(const HloValue&)>;
+  using IsUseAllowedInAlternateMemoryFunction =
+      std::function<bool(const HloUse&)>;
 
   // MemorySpaceAssignment uses a notion of a slow and large default memory
   // space and a fast and small alternate memory space.
@@ -434,6 +436,11 @@ class MemorySpaceAssignment {
     // the opcode) to be placed on the alternate memory.
     IsAllowedInAlternateMemoryFunction is_allowed_in_alternate_mem_fn;
 
+    // This function can be used to prevent certain HloUses (e.g., based on
+    // the opcode) to be placed on the alternate memory.
+    IsUseAllowedInAlternateMemoryFunction is_use_allowed_in_alternate_mem_fn =
+        [](const HloUse&) { return true; };
+
     // Specifies the upper bound for number of outstanding prefetches and
     // evictions, -1 for unlimited.
     int64 max_outstanding_prefetches = -1;
@@ -461,6 +468,9 @@ class MemorySpaceAssignment {
     // The repacking algorithm to reduce fragmentation. Must be non-null if
     // max_repacks is greater than 0.
     MemorySpaceAssignmentRepacker* repacker = nullptr;
+
+    // This is only useful for testing, repack after every allocation.
+    bool repack_after_every_allocation = false;
 
     // If true, tries allocating buffers across (e.g., before and inside a while
     // loop body) sequential calls (kWhile, kCall, and kConditional).
@@ -979,7 +989,7 @@ class AlternateMemoryBestFitHeap
 
   // Given colocated intervals, populates allocation_values with the
   // corresponding AllocationValue objects.
-  void CreateAllocationValuesFromColocatedIntervals(
+  virtual void CreateAllocationValuesFromColocatedIntervals(
       absl::Span<const AlternateMemoryBestFitHeap::BufferInterval* const>
           colocated_intervals,
       std::vector<MemorySpaceAssignment::AllocationValue>& allocation_values);
@@ -1200,6 +1210,11 @@ class AlternateMemoryBestFitHeap
   // if found.
   absl::optional<RequiredMemoryAssignment> AliasedRequiredAssignmentForUse(
       const AllocationValue::Use& use) const;
+
+  // Goes through the colocated intervals and adds any required assignment.
+  void AddRequiredAssignmentsForColocatedIntervals(
+      absl::Span<const AlternateMemoryBestFitHeap::BufferInterval* const>
+          colocated_intervals);
 
   // Propagates aliased required assignment for a given position.
   void AddAliasedRequiredAssignment(

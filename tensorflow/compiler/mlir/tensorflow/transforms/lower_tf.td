@@ -35,6 +35,8 @@ def GetScalarNanOfType : NativeCodeCall<
 class GetI64ScalarElementsAttr<int value> :
   NativeCodeCall<"GetI64ElementsAttr({" # value # "}, &$_builder)">;
 
+def TrueBoolAttr : AttrConstraint<CPred<"$_self.getValue()">>;
+
 //===----------------------------------------------------------------------===//
 // BiasAddGrad op patterns.
 //===----------------------------------------------------------------------===//
@@ -159,6 +161,15 @@ def LowerFillOp : Pat<(TF_FillOp $dims, $value),
                       (TF_BroadcastToOp $value, $dims)>;
 
 //===----------------------------------------------------------------------===//
+// Empty op patterns.
+//===----------------------------------------------------------------------===//
+
+def LowerEmptyOp : Pat<(TF_EmptyOp:$result $dims, TrueBoolAttr:$init),
+                      (TF_BroadcastToOp
+                       (TF_ConstOp (GetScalarOfType<0> $result)), $dims),
+                      [(TF_SintOrFpTensor $result)]>;
+
+//===----------------------------------------------------------------------===//
 // Inf op patterns.
 //===----------------------------------------------------------------------===//
 
@@ -226,7 +237,7 @@ def : Pat<(TF_RoundOp:$res TF_FloatTensor:$input),
             (TF_SubOp $input, (TF_FloorOp:$floor $input)),
             (TF_ConstOp (GetScalarOfFloatType<"0.5"> $input))),
            $floor,
-           (TF_AddOp
+           (TF_AddV2Op
             (TF_ConstOp (GetScalarOfType<1> $input)), $floor))>;
 
 
@@ -271,15 +282,35 @@ def LowerFakeQuantWithMinMaxArgs :
 def CreateTFShapeOp : NativeCodeCall<
     "$_builder.create<TF::ShapeOp>($0.getLoc(), $1, $2)">;
 
-// TODO(hinsu): Support inputs of TensorList types.
-def LowerZerosLikeOp :
-  Pat<(TF_ZerosLikeOp:$src_op TensorOf<[AnySignlessInteger, AnyFloat]>:$input),
-      (TF_BroadcastToOp (TF_ConstOp (GetScalarOfType<0> $input)),
-                        (CreateTFShapeOp $src_op, $input, /*use 32bit*/ConstBoolAttrFalse))>;
+class LowerInitializationOp<Op FromOp, int initial_val>
+  : Pat<(FromOp:$src_op
+         TensorOf<[AnyInteger, AnyFloat, AnyComplex]>:$input),
+        (TF_BroadcastToOp (TF_ConstOp (GetScalarOfType<initial_val> $input)),
+                          (CreateTFShapeOp $src_op, $input,
+                                           /*use 32bit*/ConstBoolAttrFalse))>;
+
+def LowerZerosLikeOp : LowerInitializationOp<TF_ZerosLikeOp, 0>;
+def LowerOnesLikeOp : LowerInitializationOp<TF_OnesLikeOp, 1>;
 
 def LowerScatterNdOp :
   Pat<(TF_ScatterNdOp $indices,
-       TensorOf<[AnySignlessInteger, AnyFloat]>:$updates, $shape),
-      (TF_TensorScatterUpdateOp
+       TensorOf<[AnyInteger, AnyFloat, AnyComplex]>:$updates, $shape),
+      (TF_TensorScatterAddOp
        (TF_FillOp $shape, (TF_ConstOp (GetScalarOfType<0> $updates))),
        $indices, $updates)>;
+
+//===----------------------------------------------------------------------===//
+// Xdivy, Xlog1p and Xlogy op patterns.
+//===----------------------------------------------------------------------===//
+
+class BinaryXopyPat<dag From, dag To>
+  : Pat<From,
+        (TF_SelectV2Op (TF_EqualOp $x,
+                                   (TF_ConstOp:$zero (GetScalarOfType<0> $x)),
+                       /*incompatible_shape_error*/ConstBoolAttrTrue),
+           $zero, To)>;
+
+foreach fromToPair = [[(TF_XdivyOp $x, $y), (TF_DivOp $x, $y)],
+                      [(TF_Xlog1pyOp $x, $y), (TF_MulOp $x, (TF_Log1pOp $y))],
+                      [(TF_XlogyOp $x, $y), (TF_MulOp $x, (TF_LogOp $y))]] in
+  def : BinaryXopyPat<fromToPair[0], fromToPair[1]>;

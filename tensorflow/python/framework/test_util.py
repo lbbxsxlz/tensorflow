@@ -43,8 +43,6 @@ from google.protobuf import text_format
 
 from tensorflow.core.framework import graph_pb2
 from tensorflow.core.protobuf import rewriter_config_pb2
-from tensorflow.python import _pywrap_stacktrace_handler
-from tensorflow.python import _pywrap_util_port
 from tensorflow.python import tf2
 from tensorflow.python.client import device_lib
 from tensorflow.python.client import pywrap_tf_session
@@ -79,9 +77,11 @@ from tensorflow.python.ops import variables
 from tensorflow.python.ops.ragged import ragged_ops  # pylint: disable=unused-import
 from tensorflow.python.ops.ragged import ragged_tensor
 from tensorflow.python.ops.ragged import ragged_tensor_value
+from tensorflow.python.platform import _pywrap_stacktrace_handler
 from tensorflow.python.platform import googletest
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.training import server_lib
+from tensorflow.python.util import _pywrap_util_port
 from tensorflow.python.util import compat
 from tensorflow.python.util import deprecation
 from tensorflow.python.util import nest
@@ -108,7 +108,7 @@ except Exception:  # pylint: disable=broad-except
 # Uses the same mechanism as above to selectively enable/disable MLIR
 # compilation.
 def is_mlir_bridge_enabled():
-  return False
+  return None
 
 
 try:
@@ -616,12 +616,12 @@ def enable_output_all_intermediates(fn):
     The wrapped function
   """
 
-  def wrapper(self, *args, **kwargs):
+  def wrapper(*args, **kwargs):
     output_all_intermediates_old = \
         control_flow_util_v2._EXPERIMENTAL_OUTPUT_ALL_INTERMEDIATES_OVERRIDE
     control_flow_util_v2._EXPERIMENTAL_OUTPUT_ALL_INTERMEDIATES_OVERRIDE = True
     try:
-      return fn(self, *args, **kwargs)
+      return fn(*args, **kwargs)
     finally:
       control_flow_util_v2._EXPERIMENTAL_OUTPUT_ALL_INTERMEDIATES_OVERRIDE = \
           output_all_intermediates_old
@@ -1554,6 +1554,11 @@ def is_gpu_available(cuda_only=False, min_cuda_compute_capability=None):
   also return False. Use `tf.test.is_built_with_cuda` to validate if TensorFlow
   was build with CUDA support.
 
+  For example,
+  >>> gpu_available = tf.test.is_gpu_available()
+  >>> is_cuda_gpu_available = tf.test.is_gpu_available(cuda_only=True)
+  >>> is_cuda_gpu_min_3 = tf.test.is_gpu_available(True, (3,0))
+
   Args:
     cuda_only: limit the search to CUDA GPUs.
     min_cuda_compute_capability: a (major,minor) pair that indicates the minimum
@@ -1977,6 +1982,9 @@ def matmul_without_tf32(a, b, *args, **kwargs):
   If a matmul itself is being tested, or some other op which uses matmul, use
   `run_without_tensor_float_32` instead.
 
+  This also casts complex64 inputs to complex128, since TensorFloat-32 can also
+  be used with complex64
+
   Args:
     a: First input to tf.linalg.matmul
     b: Second input to tf.linalg.matmul
@@ -1989,6 +1997,11 @@ def matmul_without_tf32(a, b, *args, **kwargs):
   if config.tensor_float_32_execution_enabled() and a.dtype == "float32":
     a = math_ops.cast(a, "float64")
     b = math_ops.cast(b, "float64")
+    ret = math_ops.matmul(a, b, *args, **kwargs)
+    return math_ops.cast(ret, a.dtype)
+  elif config.tensor_float_32_execution_enabled() and a.dtype == "complex64":
+    a = math_ops.cast(a, "complex128")
+    b = math_ops.cast(b, "complex128")
     ret = math_ops.matmul(a, b, *args, **kwargs)
     return math_ops.cast(ret, a.dtype)
   else:
@@ -2022,8 +2035,13 @@ class TensorFlowTestCase(googletest.TestCase):
       # disable it here.
       pywrap_tf_session.TF_SetXlaConstantFoldingDisabled(True)
 
+    # Check if the mlir bridge has been explicitly enabled or disabled. If
+    # is_mlir_bridge_enabled() returns None, the user did not explictly enable
+    # or disable the bridge so do not update enable_mlir_bridge.
     if is_mlir_bridge_enabled():
       context.context().enable_mlir_bridge = True
+    elif is_mlir_bridge_enabled() is not None:
+      context.context().enable_mlir_bridge = False
 
     self._threads = []
     self._tempdir = None
@@ -2163,10 +2181,9 @@ class TensorFlowTestCase(googletest.TestCase):
       message: the message to validate.
       msg: Optional message to report on failure.
     """
-    msg = msg if msg else ""
     if isinstance(expected_message_maybe_ascii, type(message)):
       expected_message = expected_message_maybe_ascii
-      self._AssertProtoEquals(expected_message, message)
+      self._AssertProtoEquals(expected_message, message, msg=msg)
     elif isinstance(expected_message_maybe_ascii, (str, bytes)):
       expected_message = type(message)()
       text_format.Merge(
@@ -2175,8 +2192,8 @@ class TensorFlowTestCase(googletest.TestCase):
           descriptor_pool=descriptor_pool.Default())
       self._AssertProtoEquals(expected_message, message, msg=msg)
     else:
-      assert False, ("Can't compare protos of type %s and %s. %s" %
-                     (type(expected_message_maybe_ascii), type(message), msg))
+      assert False, ("Can't compare protos of type %s and %s." %
+                     (type(expected_message_maybe_ascii), type(message)))
 
   def assertProtoEqualsVersion(
       self,
@@ -2562,6 +2579,12 @@ class TensorFlowTestCase(googletest.TestCase):
     self.assertEqual(a.shape, b.shape, shape_mismatch_msg)
 
     msgs = [msg]
+    # np.allclose does not always work for our custom bfloat16 extension type
+    # when type promotions are involved, so we first cast any bfloat16 arrays
+    # to float32.
+    a_dtype = a.dtype
+    a = a.astype(np.float32) if a.dtype == dtypes.bfloat16.as_numpy_dtype else a
+    b = b.astype(np.float32) if b.dtype == dtypes.bfloat16.as_numpy_dtype else b
     if not np.allclose(a, b, rtol=rtol, atol=atol):
       # Adds more details to np.testing.assert_allclose.
       #
@@ -2585,7 +2608,7 @@ class TensorFlowTestCase(googletest.TestCase):
       msgs.append("not close rhs = {}".format(y))
       msgs.append("not close dif = {}".format(np.abs(x - y)))
       msgs.append("not close tol = {}".format(atol + rtol * np.abs(y)))
-      msgs.append("dtype = {}, shape = {}".format(a.dtype, a.shape))
+      msgs.append("dtype = {}, shape = {}".format(a_dtype, a.shape))
       # TODO(xpan): There seems to be a bug:
       # tensorflow/compiler/tests:binary_ops_test pass with float32
       # nan even though the equal_nan is False by default internally.
@@ -2746,23 +2769,29 @@ class TensorFlowTestCase(googletest.TestCase):
     self.assertAllClose(a, b, rtol=rtol, atol=atol, msg=msg)
 
   @py_func_if_in_function
-  def assertNotAllClose(self, a, b, **kwargs):
+  def assertNotAllClose(self, a, b, rtol=1e-6, atol=1e-6, msg=None):
     """Assert that two numpy arrays, or Tensors, do not have near values.
 
     Args:
-      a: the first value to compare.
-      b: the second value to compare.
-      **kwargs: additional keyword arguments to be passed to the underlying
-        `assertAllClose` call.
+      a: The expected numpy `ndarray`, or anything that can be converted into a
+        numpy `ndarray` (including Tensor), or any arbitrarily nested of
+        structure of these.
+      b: The actual numpy `ndarray`, or anything that can be converted into a
+        numpy `ndarray` (including Tensor), or any arbitrarily nested of
+        structure of these.
+      rtol: relative tolerance.
+      atol: absolute tolerance.
+      msg: Optional message to report on failure.
 
     Raises:
       AssertionError: If `a` and `b` are unexpectedly close at all elements.
     """
     try:
-      self.assertAllClose(a, b, **kwargs)
+      self.assertAllClose(a, b,  rtol=rtol, atol=atol, msg=msg)
     except AssertionError:
       return
-    raise AssertionError("The two values are close at all elements")
+    msg = msg or ""
+    raise AssertionError("The two values are close at all elements. %s" % msg)
 
   @py_func_if_in_function
   def assertAllEqual(self, a, b, msg=None):

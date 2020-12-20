@@ -893,6 +893,9 @@ AlternateMemoryBestFitHeap::GetSortedColocatedIntervals(
 bool AlternateMemoryBestFitHeap::IsUseAllowedInAlternateMemory(
     const AllocationValue& value, const HloUse& use) const {
   const auto& instruction_schedule = hlo_live_range_.instruction_schedule();
+  if (!options_.is_use_allowed_in_alternate_mem_fn(use)) {
+    return false;
+  }
   if (use.instruction->opcode() == HloOpcode::kWhile) {
     HloComputation* while_body = use.instruction->while_body();
 
@@ -1207,6 +1210,7 @@ HeapSimulator::Result<HloValue> AlternateMemoryBestFitHeap::Finish() {
     bool repacked = false;
     for (int retry_number = 0; retry_number < options_.max_retries;
          retry_number++) {
+      AddRequiredAssignmentsForColocatedIntervals(colocated_intervals);
       bool final_retry = (retry_number == options_.max_retries - 1);
       options_.prefetch_interval_picker->SetRetryNumber(retry_number);
       Result result =
@@ -1217,7 +1221,8 @@ HeapSimulator::Result<HloValue> AlternateMemoryBestFitHeap::Finish() {
           (!final_retry && result_failed_because_of_async_copy(result))) {
         UncommitPendingChunks(absl::MakeSpan(allocation_values));
         VLOG(2) << "Couldn't allocate. Retry number " << retry_number;
-      } else if (result_is(result, Result::kFailOutOfMemory) &&
+      } else if ((result_is(result, Result::kFailOutOfMemory) ||
+                  options_.repack_after_every_allocation) &&
                  num_repacks_ < options_.max_repacks && !repacked) {
         UncommitPendingChunks(absl::MakeSpan(allocation_values));
         ++num_repacks_;
@@ -1248,13 +1253,15 @@ HeapSimulator::Result<HloValue> AlternateMemoryBestFitHeap::Finish() {
   VLOG(3) << allocation_info_str_;
   DumpDebugStringsIfEnabled();
 
-  return result_;
+  HeapSimulator::Result<HloValue> result;
+  result.heap_size = result_.heap_size;
+  result.heap_results.emplace_back(std::move(result_));
+  return result;
 }
 
-void AlternateMemoryBestFitHeap::CreateAllocationValuesFromColocatedIntervals(
+void AlternateMemoryBestFitHeap::AddRequiredAssignmentsForColocatedIntervals(
     absl::Span<const AlternateMemoryBestFitHeap::BufferInterval* const>
-        colocated_intervals,
-    std::vector<MemorySpaceAssignment::AllocationValue>& allocation_values) {
+        colocated_intervals) {
   // TODO(berkin): For now, place the phi values due to conditionals in
   // default memory.
   for (const BufferInterval* colocated_interval : colocated_intervals) {
@@ -1273,7 +1280,12 @@ void AlternateMemoryBestFitHeap::CreateAllocationValuesFromColocatedIntervals(
       }
     }
   }
+}
 
+void AlternateMemoryBestFitHeap::CreateAllocationValuesFromColocatedIntervals(
+    absl::Span<const AlternateMemoryBestFitHeap::BufferInterval* const>
+        colocated_intervals,
+    std::vector<MemorySpaceAssignment::AllocationValue>& allocation_values) {
   // Create AllocationValues for all the colocated intervals.
   for (const auto& colocated_interval : colocated_intervals) {
     CreateAllocationValues(*colocated_interval, allocation_values);
@@ -1992,14 +2004,26 @@ AlternateMemoryBestFitHeap::Result AlternateMemoryBestFitHeap::AllocateSegment(
   }
 
   if (required_assignment_at_start) {
-    if (!allocation_sequence->empty() &&
-        required_assignment_at_start->memory_space == MemorySpace::kAlternate) {
-      const auto& prev_allocation = allocation_sequence->back();
-      CHECK(prev_allocation->memory_space() ==
-            required_assignment_at_start->memory_space);
-      CHECK_EQ(GetAliasedOffset(*prev_allocation),
-               required_assignment_at_start->offset);
-      prev_allocation->Extend(request.start_time);
+    if (!allocation_sequence->empty()) {
+      // We shouldn't have a situation where the required assignment at start is
+      // at alternate memory space and we have existing allocations in the
+      // allocation sequence. The only time we'll have required assignment at
+      // start to be in the alternate memory space is in called computations
+      // (e.g., while body) and we shouldn't have any allocations in the
+      // allocation sequence so far.
+      CHECK(required_assignment_at_start->memory_space ==
+            MemorySpace::kDefault);
+      // Find the previous allocation in default memory (might not be the very
+      // last one) and extend its lifetime to include the start time of this
+      // segment.
+      auto prev_allocation_in_default_mem_it = std::find_if(
+          allocation_sequence->rbegin(), allocation_sequence->rend(),
+          [&](const auto& allocation) {
+            return allocation->memory_space() == MemorySpace::kDefault &&
+                   allocation->defining_position() == defining_position;
+          });
+      CHECK(prev_allocation_in_default_mem_it != allocation_sequence->rend());
+      (*prev_allocation_in_default_mem_it)->Extend(request.start_time);
     } else {
       absl::optional<Chunk> aliased_chunk = absl::nullopt;
       if (required_assignment_at_start->memory_space ==
@@ -2758,14 +2782,23 @@ StatusOr<HloInstruction*> MemorySpaceAssignment::Allocation::ReplaceTupleWith(
   std::vector<HloInstruction*> tuple_args(tuple_shape.tuple_shapes_size());
   for (int64 i = 0; i < tuple_shape.tuple_shapes_size(); ++i) {
     const Shape& subshape = tuple_shape.tuple_shapes(i);
+    // If tuple is a tuple instruction, we can get the tuple instruction's
+    // operand to construct the new tuple to improve compilation time
+    // performance.
+    auto get_operand = [&]() {
+      if (tuple->opcode() == HloOpcode::kTuple) {
+        return tuple->mutable_operand(i);
+      } else {
+        return computation->AddInstruction(
+            HloInstruction::CreateGetTupleElement(subshape, tuple, i));
+      }
+    };
     if (i == shape_index[0]) {
       // If the subshape is still a tuple, recurse and pass a new shape index
       // for the one level deeper.
       if (subshape.IsTuple()) {
-        HloInstruction* get_tuple_element = computation->AddInstruction(
-            HloInstruction::CreateGetTupleElement(subshape, tuple, i));
         TF_ASSIGN_OR_RETURN(tuple_args[i],
-                            ReplaceTupleWith(new_instruction, get_tuple_element,
+                            ReplaceTupleWith(new_instruction, get_operand(),
                                              ShapeIndex(shape_index.begin() + 1,
                                                         shape_index.end())));
       } else {
@@ -2775,13 +2808,20 @@ StatusOr<HloInstruction*> MemorySpaceAssignment::Allocation::ReplaceTupleWith(
                   << "; inserting a bitcast.";
           new_instruction = computation->AddInstruction(
               HloInstruction::CreateBitcast(subshape, new_instruction));
+        } else if (tuple->opcode() == HloOpcode::kTuple &&
+                   tuple->operand(i) == new_instruction) {
+          // If the tuple element is the same as the new instruction, we
+          // actually don't have to create a new tuple, just return the original
+          // tuple.
+          VLOG(4) << "Tuple already contains the new instruction = "
+                  << new_instruction->ToShortString()
+                  << " tuple = " << tuple->ToShortString();
+          return tuple;
         }
         tuple_args[i] = new_instruction;
       }
     } else {
-      HloInstruction* get_tuple_element = computation->AddInstruction(
-          HloInstruction::CreateGetTupleElement(subshape, tuple, i));
-      tuple_args[i] = get_tuple_element;
+      tuple_args[i] = get_operand();
     }
   }
   return computation->AddInstruction(HloInstruction::CreateTuple(tuple_args));
@@ -2797,14 +2837,26 @@ HloInstruction* MemorySpaceAssignment::Allocation::AddGetTupleElements() {
                          << " position = " << defining_position().shape();
   HloComputation* computation = producing_instruction->parent();
 
-  // If the instruction we're processing is a tuple, we (recursively) create
-  // kGetTupleElement instructions and copy that value. Asynchronous copies only
-  // support array types.
+  // If the instruction we're processing is a tuple, we (recursively) search or
+  // create kGetTupleElement instructions and copy that value. Asynchronous
+  // copies only support array types.
   for (int64 index : defining_position().index) {
-    producing_instruction =
-        computation->AddInstruction(HloInstruction::CreateGetTupleElement(
-            producing_instruction->shape().tuple_shapes(index),
-            producing_instruction, index));
+    // We first search if there already is a get-tuple-element with the correct
+    // index. If there is no such get-tuple-element, we create one.
+    auto gte_it = absl::c_find_if(
+        producing_instruction->users(), [index](const HloInstruction* use) {
+          return use != use->parent()->root_instruction() &&
+                 use->opcode() == HloOpcode::kGetTupleElement &&
+                 use->tuple_index() == index;
+        });
+    if (gte_it != producing_instruction->users().end()) {
+      producing_instruction = *gte_it;
+    } else {
+      producing_instruction =
+          computation->AddInstruction(HloInstruction::CreateGetTupleElement(
+              producing_instruction->shape().tuple_shapes(index),
+              producing_instruction, index));
+    }
   }
   return producing_instruction;
 }

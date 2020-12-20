@@ -30,6 +30,7 @@ from tensorflow.core.example import feature_pb2
 from tensorflow.python.client import session
 from tensorflow.python.eager import backprop
 from tensorflow.python.eager import def_function
+from tensorflow.python.framework import composite_tensor
 from tensorflow.python.framework import config
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
@@ -37,7 +38,9 @@ from tensorflow.python.framework import indexed_slices
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import sparse_tensor
 from tensorflow.python.framework import tensor_shape
+from tensorflow.python.framework import tensor_spec
 from tensorflow.python.framework import test_util
+from tensorflow.python.framework import type_spec
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import bitwise_ops
 from tensorflow.python.ops import cond_v2
@@ -45,6 +48,7 @@ from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import control_flow_v2_toggles
 from tensorflow.python.ops import data_flow_ops
 from tensorflow.python.ops import functional_ops
+from tensorflow.python.ops import gen_dataset_ops
 from tensorflow.python.ops import gen_list_ops
 from tensorflow.python.ops import gen_nn_ops
 from tensorflow.python.ops import gradient_checker_v2
@@ -104,6 +108,14 @@ class PForTest(PForTestCase):
           loop_fn,
           4 * constant_op.constant(2),
           parallel_iterations=parallel_iterations)
+
+  def test_parallel_iterations_preserves_static_shape(self):
+    for parallel_iterations in [2, 3, 8, 10]:
+      x = pfor_control_flow_ops.pfor(
+          lambda _: random_ops.random_uniform([2, 3]),
+          8,
+          parallel_iterations=parallel_iterations)
+      self.assertAllEqual(x.shape, [8, 2, 3])
 
   def test_parallel_iterations_zero(self):
     with self.assertRaisesRegex(ValueError, "positive integer"):
@@ -971,6 +983,65 @@ class TensorListTest(PForTestCase):
 
     self._test_loop_fn(loop_fn, 2)
 
+  def test_create_outside_and_push_back(self):
+    h = list_ops.tensor_list_reserve([2], 2, dtypes.int32)
+
+    def loop_fn(i):
+      handle = list_ops.tensor_list_push_back(h, [i, 2])
+      handle = list_ops.tensor_list_push_back(handle, [1, 2])
+      handle = list_ops.tensor_list_push_back(handle, [1, 2])
+      return list_ops.tensor_list_stack(handle, dtypes.int32)
+
+    self._test_loop_fn(loop_fn, 3)
+
+  def test_create_inside_and_push_back(self):
+
+    def loop_fn(i):
+      handle = list_ops.tensor_list_reserve([2], 2, dtypes.int32)
+      handle = list_ops.tensor_list_push_back(handle, [i, 2])
+      handle = list_ops.tensor_list_push_back(handle, [1, 2])
+      return list_ops.tensor_list_stack(handle, dtypes.int32)
+
+    self._test_loop_fn(loop_fn, 3)
+
+  def test_pop_back_no_shape(self):
+
+    def loop_fn(i):
+      handle = list_ops.tensor_list_reserve([2], 2, dtypes.int32)
+      handle = list_ops.tensor_list_push_back(handle, [1, 2])
+      handle = list_ops.tensor_list_push_back(handle, [i, 2])
+      handle, tensor = list_ops.tensor_list_pop_back(handle, dtypes.int32)
+      return tensor, list_ops.tensor_list_stack(handle, dtypes.int32)
+
+    self._test_loop_fn(loop_fn, 3)
+
+  def test_pop_back_no_shape_capture(self):
+    h = list_ops.tensor_list_reserve([2], 1, dtypes.int32)
+    h = list_ops.tensor_list_push_back(h, [1, 2])
+
+    def loop_fn(i):
+      handle, tensor = list_ops.tensor_list_pop_back(h, dtypes.int32)
+      handle = list_ops.tensor_list_push_back(handle, [1, i])
+      return tensor, list_ops.tensor_list_stack(handle, dtypes.int32)
+
+    self._test_loop_fn(loop_fn, 3)
+
+  def test_pop_back_with_shape(self):
+
+    @def_function.function
+    def loop_fn(i):
+      with backprop.GradientTape() as tape:
+        handle = list_ops.tensor_list_reserve(None, 1, dtypes.float32)
+        x = math_ops.cast(i, dtypes.float32)[None]
+        tape.watch(x)
+        handle = list_ops.tensor_list_push_back(handle, x)
+        stacked = list_ops.tensor_list_stack(handle, dtypes.float32)
+      list_grad = tape.gradient(stacked, x, x)
+      self.assertEqual("TensorListPopBack", list_grad.op.type)
+      return list_grad, stacked, list_grad.op.inputs[1]
+
+    self._test_loop_fn(loop_fn, 3)
+
   def test_create_outside_and_scatter(self):
     h = list_ops.tensor_list_reserve([2], 2, dtypes.int32)
 
@@ -1096,6 +1167,21 @@ class TensorListTest(PForTestCase):
       l2 = list_ops.tensor_list_set_item(l2, 1, i)
       return list_ops.tensor_list_stack(
           math_ops.add_n([l1, l2]), dtypes.int32)
+
+    self._test_loop_fn(loop_fn, 2)
+
+
+class OptionalTest(PForTestCase):
+
+  def test_optional_from_value(self):
+
+    def loop_fn(i):
+      o = gen_dataset_ops.optional_from_value(
+          [i, i + 1, constant_op.constant(3)])
+      gen_dataset_ops.optional_none()
+      return gen_dataset_ops.optional_get_value(
+          o, [dtypes.int32, dtypes.int32, dtypes.int32],
+          [[], [], []])
 
     self._test_loop_fn(loop_fn, 2)
 
@@ -1965,6 +2051,111 @@ class SparseTest(PForTestCase):
                                         [1] * num_iters,
                                         (num_iters, num_iters, num_iters))
     self.run_and_assert_equal(pfor, manual)
+
+
+# Dummy CompositeTensor to test CompositeTensor support.
+class Particle(composite_tensor.CompositeTensor):
+  """A (batch of) particles each defined by a mass and a scalar velocity."""
+
+  def __init__(self, mass, velocity):
+    mass = ops.convert_to_tensor(mass)
+    velocity = ops.convert_to_tensor(velocity)
+    self.shape = array_ops.broadcast_static_shape(mass.shape, velocity.shape)
+    self.mass = mass
+    self.velocity = velocity
+
+  @property
+  def _type_spec(self):
+    return ParticleSpec(
+        type_spec.type_spec_from_value(self.mass),
+        type_spec.type_spec_from_value(self.velocity))
+
+
+class ParticleSpec(type_spec.BatchableTypeSpec):
+
+  def __init__(self, mass, velocity):
+    self.shape = array_ops.broadcast_static_shape(
+        mass.shape, velocity.shape)
+    self.mass = mass
+    self.velocity = velocity
+
+  def _serialize(self):
+    return (self.mass, self.velocity)
+
+  @property
+  def value_type(self):
+    return Particle
+
+  @property
+  def _component_specs(self):
+    return (self.mass, self.velocity)
+
+  def _to_components(self, value):
+    return (value.mass, value.velocity)
+
+  def _from_components(self, components):
+    return Particle(*components)
+
+  def _pad_shape_to_full_rank(self, s):
+    """Pad component shapes with 1's so all components have the same rank."""
+    return tensor_shape.TensorShape(
+        [1] * (self.shape.ndims - s.ndims)).concatenate(s)
+
+  def _batch(self, batch_size):
+    return ParticleSpec(
+        mass=tensor_spec.TensorSpec(
+            dtype=self.mass.dtype,
+            shape=tensor_shape.TensorShape([batch_size]).concatenate(
+                self._pad_shape_to_full_rank(self.mass.shape))),
+        velocity=tensor_spec.TensorSpec(
+            dtype=self.velocity.dtype,
+            shape=tensor_shape.TensorShape([batch_size]).concatenate(
+                self._pad_shape_to_full_rank(self.velocity.shape))))
+
+  def _unbatch(self):
+    return ParticleSpec(
+                tensor_spec.TensorSpec(dtype=self.mass.dtype,
+                                       shape=self.mass.shape[1:]),
+                tensor_spec.TensorSpec(dtype=self.velocity.dtype,
+                                       shape=self.velocity.shape[1:]))
+
+  def _to_tensor_list(self, value):
+    return [array_ops.reshape(
+                value.mass,
+                self._pad_shape_to_full_rank(value.mass.shape)),
+            array_ops.reshape(
+                value.velocity,
+                self._pad_shape_to_full_rank(value.velocity.shape))]
+
+
+class CompositeTensorTest(PForTestCase, parameterized.TestCase):
+
+  @parameterized.parameters((None,), (3,))
+  def test_create_composite_inside_loop(self, parallel_iterations):
+    num_particles = 10
+    velocities = random_ops.random_uniform([num_particles])
+    particles = pfor_control_flow_ops.pfor(
+        # Build a batch of particles all with the same mass.
+        lambda i: Particle(mass=4., velocity=array_ops.gather(velocities, i)),
+        num_particles,
+        parallel_iterations=parallel_iterations)
+    particles_mass, particles_velocity, velocities = self.evaluate(
+        (particles.mass, particles.velocity, velocities))
+    self.assertAllEqual(particles_mass, 4. * np.ones([num_particles]))
+    self.assertAllEqual(particles_velocity, velocities)
+
+  @parameterized.parameters((None,), (3,))
+  def test_composite_is_converted_to_batched_tensor(
+      self, parallel_iterations):
+    particles = pfor_control_flow_ops.pfor(
+        lambda _: Particle(mass=random_ops.random_uniform([3]),  # pylint: disable=g-long-lambda
+                           velocity=random_ops.random_uniform([5, 3])),
+        4,
+        parallel_iterations=parallel_iterations)
+    # Naively batching the component shapes would give `[4, 3]` and `[4, 5, 3]`
+    # which have no consistent broadcast shape.
+    self.assertTrue(particles.mass.shape, [4, 1, 3])
+    self.assertAllEqual(particles.velocity.shape, [4, 5, 3])
 
 
 class ParsingTest(PForTestCase):

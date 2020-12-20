@@ -196,7 +196,7 @@ filegroup(
     srcs = [
         "xla_compiled_cpu_function.h",
         "//tensorflow/compiler/xla:cpu_runtime_hdrs",
-        "//tensorflow/compiler/xla/service/cpu:single_threaded_runtime_hdrs",
+        "//tensorflow/compiler/xla/service/cpu:runtime_hdrs",
         "//tensorflow/core/kernels:xla_cpu_runtime_hdrs",
         "//tensorflow/core/platform:xla_cpu_runtime_srcs",
     ],
@@ -208,7 +208,7 @@ filegroup(
     srcs = [
         "xla_compiled_cpu_function.cc",
         "//tensorflow/compiler/xla:cpu_runtime_srcs",
-        "//tensorflow/compiler/xla/service/cpu:single_threaded_runtime_srcs",
+        "//tensorflow/compiler/xla/service/cpu:runtime_srcs",
         "//tensorflow/core/kernels:xla_cpu_runtime_srcs",
         "//tensorflow/core/platform:xla_cpu_runtime_srcs",
     ],
@@ -249,6 +249,11 @@ cc_library(
         "//third_party/eigen3",
         "//tensorflow/core/framework:numeric_types",
         "//tensorflow/core/platform:bfloat16",
+    ] + [
+        # Extra dependencies required for multithreaded runtime objects.
+        "//tensorflow/core/platform:blocking_counter",
+        "//tensorflow/core/platform:logging",
+        "//tensorflow/core/platform:mutex",
     ] + tf_additional_tensor_coding_deps(),
     alwayslink = 1,
 )
@@ -345,13 +350,12 @@ cc_library(
         ":xla_helpers",
         ":xla_op_registry",
         ":xla_resource",
-        "@com_google_absl//absl/algorithm:container",
-        "@com_google_absl//absl/memory",
-        "@com_google_absl//absl/types:span",
-        "@com_google_absl//absl/types:variant",
         "//tensorflow/compiler/jit:common",
         "//tensorflow/compiler/jit:flags",
         "//tensorflow/compiler/jit:shape_inference",
+        "//tensorflow/compiler/mlir:array_container_utils",
+        "//tensorflow/compiler/mlir:mlir_bridge_rollout_policy",
+        "//tensorflow/compiler/mlir/tensorflow:compile_mlir_util_no_tf_dialect_passes",
         "//tensorflow/compiler/xla:protobuf_util",
         "//tensorflow/compiler/xla:shape_util",
         "//tensorflow/compiler/xla:status_macros",
@@ -369,13 +373,12 @@ cc_library(
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:ops",
         "//tensorflow/core:protos_all_cc",
-    ] + if_libtpu(
-        if_false = [
-            "//tensorflow/compiler/mlir:array_container_utils",
-            "//tensorflow/compiler/mlir/tensorflow:compile_mlir_util_no_tf_dialect_passes",
-        ],
-        if_true = [],
-    ),
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/types:span",
+        "@com_google_absl//absl/types:variant",
+    ],
     alwayslink = 1,
 )
 
@@ -866,9 +869,12 @@ cc_library(
     hdrs = ["mlir_bridge_pass.h"],
     deps = [
         "//tensorflow/compiler/jit:flags",
+        "//tensorflow/compiler/mlir:mlir_bridge_rollout_policy",
         "//tensorflow/compiler/mlir:mlir_graph_optimization_pass",
         "//tensorflow/compiler/mlir/tensorflow",
+        "//tensorflow/compiler/mlir/tensorflow:device_util",
         "//tensorflow/core:core_cpu",
+        "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "@llvm-project//llvm:Support",
     ],

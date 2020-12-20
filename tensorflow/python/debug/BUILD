@@ -734,7 +734,10 @@ cuda_py_test(
     size = "medium",
     srcs = ["lib/check_numerics_callback_test.py"],
     python_version = "PY3",
-    tags = ["no_windows"],
+    tags = [
+        "no_mac",  # TODO(b/175322370): Detected Infinity or NaN in output 0 of graph op "RealDiv"
+        "no_windows",
+    ],
     deps = [
         ":check_numerics_callback",
         "//tensorflow/python:framework_test_lib",
@@ -797,7 +800,6 @@ cuda_py_test(
     size = "small",
     srcs = ["lib/debug_gradients_test.py"],
     python_version = "PY3",
-    tfrt_enabled = True,
     xla_enable_strict_auto_jit = False,  # Node names are different with autojit
     deps = [
         ":debug_data",
@@ -1042,7 +1044,6 @@ cuda_py_test(
     size = "small",
     srcs = ["lib/debug_grappler_test.py"],
     python_version = "PY3",
-    tfrt_enabled = True,
     xla_enable_strict_auto_jit = False,  # Tests TF:Classic implementation.
     deps = [
         ":debug_data",
@@ -1061,7 +1062,6 @@ cuda_py_test(
     srcs = ["lib/session_debug_file_test.py"],
     python_version = "PY3",
     tags = ["notsan"],
-    tfrt_enabled = True,
     xla_enable_strict_auto_jit = False,  # Node names are different with autojit
     deps = [
         ":debug_data",
@@ -1080,7 +1080,6 @@ cuda_py_test(
     size = "small",
     srcs = ["lib/debug_graph_reconstruction_test.py"],
     python_version = "PY3",
-    tfrt_enabled = True,
     xla_enable_strict_auto_jit = False,  # Node names are different with autojit
     deps = [
         ":debug_data",
@@ -1101,7 +1100,6 @@ cuda_py_test(
     srcs = ["lib/session_debug_multi_gpu_test.py"],
     python_version = "PY3",
     tags = ["no_windows_gpu"],
-    tfrt_enabled = True,
     xla_enable_strict_auto_jit = False,  # Node names are different with autojit
     deps = [
         ":debug_data",
@@ -1224,7 +1222,6 @@ cuda_py_test(
     srcs = ["cli/analyzer_cli_test.py"],
     python_version = "PY3",
     tags = ["no_windows"],  # TODO: needs investigation on Windows
-    tfrt_enabled = True,
     xla_enable_strict_auto_jit = False,  # Node names are different with autojit
     deps = [
         ":analyzer_cli",
